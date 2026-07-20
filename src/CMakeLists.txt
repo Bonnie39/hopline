@@ -20,6 +20,19 @@ qt_add_executable(hopline
     media/VideoDecoder.cpp
     media/VideoDecoder.h
     media/VideoFrame.h
+    model/Clip.h
+    model/Command.cpp
+    model/Command.h
+    model/Commands.cpp
+    model/Commands.h
+    model/Media.h
+    model/Project.cpp
+    model/Project.h
+    model/Sequence.cpp
+    model/Sequence.h
+    model/Time.h
+    model/Track.cpp
+    model/Track.h
 )
 
 find_path(MINIAUDIO_INCLUDE_DIRS "miniaudio.h" REQUIRED)
