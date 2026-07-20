@@ -1,0 +1,21 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "hopline",
+  "version": "0.0.1",
+  "dependencies": [
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "avformat",
+        "avfilter",
+        "swresample",
+        "swscale",
+        "nvcodec",
+        "x264",
+        "x265"
+      ]
+    }
+  ]
+}
