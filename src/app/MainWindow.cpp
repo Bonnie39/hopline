@@ -144,12 +144,15 @@ void MainWindow::tick()
         m_preview->setFrame(frame);
     }
 
-    if (m_player->isPlaying()) {
+    // One extra refresh after stopping, so the final position actually gets painted.
+    const bool playing = m_player->isPlaying();
+    if (playing || m_wasPlaying) {
         statusBar()->showMessage(QString("%1 / %2 s   dropped %3")
                                      .arg(m_player->position(), 0, 'f', 2)
                                      .arg(m_player->duration(), 0, 'f', 2)
                                      .arg(m_player->droppedFrames()));
     }
+    m_wasPlaying = playing;
 }
 
 }  // namespace hopline

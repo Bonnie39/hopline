@@ -50,6 +50,7 @@ private:
     int m_height = 0;
     double m_duration = 0.0;
     double m_timeBase = 0.0;
+    double m_startTime = 0.0;  // stream pts origin; frame pts are reported relative to it
     bool m_draining = false;
 };
 

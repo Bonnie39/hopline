@@ -108,11 +108,27 @@ bool Player::update(VideoFrame& out)
         got = true;
     }
 
-    if (atEnd()) {
+    // Playback ends when the clock reaches the media duration, not when the last
+    // frame is popped: that frame still owes its own display time, and audio can
+    // outlast video.
+    if (m_eof && m_queue.size() == 0 && now >= duration()) {
         m_clock.pause();
+        m_clock.reset(duration());
     }
 
     return got;
+}
+
+double Player::position() const
+{
+    const double total = duration();
+    const double now = m_clock.seconds();
+    return total > 0.0 && now > total ? total : now;
+}
+
+bool Player::atEnd() const
+{
+    return m_eof && m_queue.size() == 0 && position() >= duration();
 }
 
 }  // namespace hopline

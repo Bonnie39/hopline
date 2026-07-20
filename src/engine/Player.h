@@ -33,8 +33,8 @@ public:
 
     bool isOpen() const { return m_decoder.isOpen(); }
     bool isPlaying() const { return m_clock.running(); }
-    bool atEnd() const { return m_eof && m_queue.size() == 0; }
-    double position() const { return m_clock.seconds(); }
+    bool atEnd() const;
+    double position() const;
     double duration() const { return m_decoder.duration(); }
     int droppedFrames() const { return m_dropped; }
 

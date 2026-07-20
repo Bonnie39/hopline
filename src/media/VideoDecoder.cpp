@@ -46,7 +46,7 @@ void VideoDecoder::close()
     m_format.reset();
     m_streamIndex = -1;
     m_width = m_height = 0;
-    m_duration = m_timeBase = 0.0;
+    m_duration = m_timeBase = m_startTime = 0.0;
     m_draining = false;
 }
 
@@ -96,6 +96,7 @@ bool VideoDecoder::open(const std::string& path, std::string& error)
     m_width = m_codec->width;
     m_height = m_codec->height;
     m_timeBase = av_q2d(stream->time_base);
+    m_startTime = stream->start_time != AV_NOPTS_VALUE ? stream->start_time * m_timeBase : 0.0;
     if (m_format->duration != AV_NOPTS_VALUE) {
         m_duration = static_cast<double>(m_format->duration) / AV_TIME_BASE;
     }
@@ -121,7 +122,7 @@ void VideoDecoder::convert(VideoFrame& out)
     sws_scale(m_sws, src->data, src->linesize, 0, src->height, dst, stride);
 
     const int64_t pts = src->best_effort_timestamp != AV_NOPTS_VALUE ? src->best_effort_timestamp : src->pts;
-    out.pts = pts != AV_NOPTS_VALUE ? static_cast<double>(pts) * m_timeBase : 0.0;
+    out.pts = pts != AV_NOPTS_VALUE ? static_cast<double>(pts) * m_timeBase - m_startTime : 0.0;
 }
 
 bool VideoDecoder::nextFrame(VideoFrame& out)

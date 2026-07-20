@@ -31,6 +31,7 @@ private:
     PreviewWidget* m_preview = nullptr;
     QTimer* m_timer = nullptr;
     std::unique_ptr<Player> m_player;
+    bool m_wasPlaying = false;
 };
 
 }  // namespace hopline
