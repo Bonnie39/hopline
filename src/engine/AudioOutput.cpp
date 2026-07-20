@@ -116,12 +116,13 @@ double AudioOutput::position() const
     }
     const uint64_t out = m_framesOut.load(std::memory_order_acquire);
     const uint64_t audible = out > m_latencyFrames ? out - m_latencyFrames : 0;
-    return static_cast<double>(audible) / m_sampleRate;
+    return m_base.load(std::memory_order_acquire) + static_cast<double>(audible) / m_sampleRate;
 }
 
-void AudioOutput::resetPosition()
+void AudioOutput::resetPosition(double baseSeconds)
 {
     m_framesOut.store(0, std::memory_order_release);
+    m_base.store(baseSeconds, std::memory_order_release);
     m_underruns.store(0, std::memory_order_relaxed);
 }
 

@@ -45,11 +45,51 @@ bool Player::open(const std::string& path, std::string& error)
     m_clock.reset(0.0);
     m_queue.reopen();
 
+    startThreads();
+    return true;
+}
+
+void Player::startThreads()
+{
     m_videoThread = std::thread(&Player::videoLoop, this);
     if (m_audioOut.isOpen()) {
         m_audioThread = std::thread(&Player::audioLoop, this);
     }
-    return true;
+}
+
+void Player::seek(double seconds)
+{
+    if (!isOpen()) {
+        return;
+    }
+
+    const bool wasPlaying = isPlaying();
+    pause();
+
+    // Both decoders must be idle before repositioning them, so the seek is a
+    // stop / reposition / restart rather than a message to a running thread.
+    stopThreads();
+
+    const double total = duration();
+    seconds = seconds < 0.0 ? 0.0 : (total > 0.0 && seconds > total ? total : seconds);
+
+    m_video.seek(seconds);
+    if (m_audio.isOpen()) {
+        m_audio.seek(seconds);
+    }
+
+    m_queue.clear();
+    m_audioOut.buffer().clear();
+    m_audioOut.resetPosition(seconds);
+    m_audioOut.setEndOfStream(false);
+    m_clock.reset(seconds);
+    m_eof = false;
+    m_presentNext = true;
+
+    startThreads();
+    if (wasPlaying) {
+        play();
+    }
 }
 
 void Player::close()
@@ -159,6 +199,18 @@ bool Player::isPlaying() const
 
 bool Player::update(VideoFrame& out)
 {
+    // After a seek the clock is already at the target, so wait for the first
+    // decoded frame and show it immediately rather than treating it as due.
+    if (m_presentNext) {
+        VideoFrame frame;
+        if (!m_queue.tryPop(frame)) {
+            return false;
+        }
+        out = std::move(frame);
+        m_presentNext = false;
+        return true;
+    }
+
     const double now = position();
     bool got = false;
     double pts = 0.0;

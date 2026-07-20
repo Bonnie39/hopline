@@ -45,6 +45,8 @@ void AudioDecoder::close()
     m_format.reset();
     m_streamIndex = -1;
     m_sampleRate = m_channels = 0;
+    m_timeBase = m_startTime = 0.0;
+    m_skipUntil = -1.0;
     m_draining = false;
 }
 
@@ -110,6 +112,27 @@ bool AudioDecoder::open(const std::string& path, int sampleRate, int channels, s
     m_packet.reset(av_packet_alloc());
     m_sampleRate = sampleRate;
     m_channels = channels;
+    m_timeBase = av_q2d(stream->time_base);
+    m_startTime = stream->start_time != AV_NOPTS_VALUE ? stream->start_time * m_timeBase : 0.0;
+    return true;
+}
+
+bool AudioDecoder::seek(double seconds)
+{
+    if (!isOpen()) {
+        return false;
+    }
+
+    const int64_t target = static_cast<int64_t>((seconds + m_startTime) / m_timeBase);
+    if (av_seek_frame(m_format.get(), m_streamIndex, target, AVSEEK_FLAG_BACKWARD) < 0) {
+        return false;
+    }
+
+    avcodec_flush_buffers(m_codec.get());
+    // Drop swr's buffered tail, or resampled audio from before the seek leaks through.
+    swr_init(m_swr);
+    m_skipUntil = seconds;
+    m_draining = false;
     return true;
 }
 
@@ -123,6 +146,16 @@ bool AudioDecoder::nextChunk(std::vector<float>& out)
         const int rc = avcodec_receive_frame(m_codec.get(), m_frame.get());
         if (rc == 0) {
             AVFrame* src = m_frame.get();
+
+            const int64_t rawPts = src->best_effort_timestamp != AV_NOPTS_VALUE ? src->best_effort_timestamp : src->pts;
+            const double pts = rawPts != AV_NOPTS_VALUE ? rawPts * m_timeBase - m_startTime : 0.0;
+            const double frameEnd = pts + static_cast<double>(src->nb_samples) / src->sample_rate;
+            if (m_skipUntil >= 0.0 && frameEnd < m_skipUntil) {
+                av_frame_unref(src);
+                continue;
+            }
+            m_skipUntil = -1.0;
+
             // swr may hold buffered samples, so the output count isn't just a ratio.
             const int maxOut = static_cast<int>(
                 swr_get_delay(m_swr, m_sampleRate) + src->nb_samples * static_cast<int64_t>(m_sampleRate) / src->sample_rate + 256);

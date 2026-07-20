@@ -30,6 +30,9 @@ public:
     void pause();
     void togglePlay();
 
+    // Repositions both streams and rebases the clock. Preserves play state.
+    void seek(double seconds);
+
     // Pulls every frame now due, returning the newest in `out`. Late frames are
     // dropped rather than shown behind the clock. False if nothing is due yet.
     bool update(VideoFrame& out);
@@ -46,6 +49,7 @@ public:
 private:
     void videoLoop();
     void audioLoop();
+    void startThreads();
     void stopThreads();
 
     VideoDecoder m_video;
@@ -59,6 +63,7 @@ private:
     std::atomic<bool> m_stop{ false };
     std::atomic<bool> m_eof{ false };
     int m_dropped = 0;
+    bool m_presentNext = false;  // show the first frame after a seek without waiting for the clock
 };
 
 }  // namespace hopline

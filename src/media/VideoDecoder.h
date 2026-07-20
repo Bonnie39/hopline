@@ -27,6 +27,10 @@ public:
     bool open(const std::string& path, std::string& error);
     void close();
 
+    // Lands on the keyframe at or before `seconds`; nextFrame() then decodes
+    // forward and discards until the target is reached.
+    bool seek(double seconds);
+
     // Returns false at end of stream or on decode error.
     bool nextFrame(VideoFrame& out);
 
@@ -38,6 +42,7 @@ public:
 private:
     struct Deleters;
     void convert(VideoFrame& out);
+    double framePts() const;
 
     std::unique_ptr<AVFormatContext, void (*)(AVFormatContext*)> m_format;
     std::unique_ptr<AVCodecContext, void (*)(AVCodecContext*)> m_codec;
@@ -51,6 +56,7 @@ private:
     double m_duration = 0.0;
     double m_timeBase = 0.0;
     double m_startTime = 0.0;  // stream pts origin; frame pts are reported relative to it
+    double m_skipUntil = -1.0;  // set by seek(); frames before this are discarded
     bool m_draining = false;
 };
 

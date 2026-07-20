@@ -47,6 +47,7 @@ void VideoDecoder::close()
     m_streamIndex = -1;
     m_width = m_height = 0;
     m_duration = m_timeBase = m_startTime = 0.0;
+    m_skipUntil = -1.0;
     m_draining = false;
 }
 
@@ -121,8 +122,30 @@ void VideoDecoder::convert(VideoFrame& out)
     int stride[4] = { src->width * 4, 0, 0, 0 };
     sws_scale(m_sws, src->data, src->linesize, 0, src->height, dst, stride);
 
+}
+
+double VideoDecoder::framePts() const
+{
+    const AVFrame* src = m_frame.get();
     const int64_t pts = src->best_effort_timestamp != AV_NOPTS_VALUE ? src->best_effort_timestamp : src->pts;
-    out.pts = pts != AV_NOPTS_VALUE ? static_cast<double>(pts) * m_timeBase - m_startTime : 0.0;
+    return pts != AV_NOPTS_VALUE ? static_cast<double>(pts) * m_timeBase - m_startTime : 0.0;
+}
+
+bool VideoDecoder::seek(double seconds)
+{
+    if (!isOpen()) {
+        return false;
+    }
+
+    const int64_t target = static_cast<int64_t>((seconds + m_startTime) / m_timeBase);
+    if (av_seek_frame(m_format.get(), m_streamIndex, target, AVSEEK_FLAG_BACKWARD) < 0) {
+        return false;
+    }
+
+    avcodec_flush_buffers(m_codec.get());
+    m_skipUntil = seconds;
+    m_draining = false;
+    return true;
 }
 
 bool VideoDecoder::nextFrame(VideoFrame& out)
@@ -134,7 +157,17 @@ bool VideoDecoder::nextFrame(VideoFrame& out)
     while (true) {
         const int rc = avcodec_receive_frame(m_codec.get(), m_frame.get());
         if (rc == 0) {
+            const double pts = framePts();
+            // Check before converting: no point running swscale on frames the
+            // seek is going to discard.
+            if (m_skipUntil >= 0.0 && pts < m_skipUntil) {
+                av_frame_unref(m_frame.get());
+                continue;
+            }
+            m_skipUntil = -1.0;
+
             convert(out);
+            out.pts = pts;
             av_frame_unref(m_frame.get());
             return true;
         }

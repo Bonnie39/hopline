@@ -37,7 +37,9 @@ public:
     // Seconds of audio actually audible, i.e. frames handed to the device less
     // the device's own buffering. This is the clock everything else follows.
     double position() const;
-    void resetPosition();
+
+    // Rebases the clock after a seek: frames played are counted from here.
+    void resetPosition(double baseSeconds = 0.0);
 
     int sampleRate() const { return m_sampleRate; }
     int channels() const { return m_channels; }
@@ -53,6 +55,7 @@ private:
     RingBuffer m_buffer;
 
     std::atomic<uint64_t> m_framesOut{ 0 };
+    std::atomic<double> m_base{ 0.0 };
     std::atomic<int> m_underruns{ 0 };
     std::atomic<bool> m_paused{ true };
     std::atomic<bool> m_endOfStream{ false };

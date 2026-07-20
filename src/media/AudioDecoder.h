@@ -25,6 +25,8 @@ public:
     bool open(const std::string& path, int sampleRate, int channels, std::string& error);
     void close();
 
+    bool seek(double seconds);
+
     // Appends interleaved samples. False at end of stream.
     bool nextChunk(std::vector<float>& out);
 
@@ -42,6 +44,9 @@ private:
     int m_streamIndex = -1;
     int m_sampleRate = 0;
     int m_channels = 0;
+    double m_timeBase = 0.0;
+    double m_startTime = 0.0;
+    double m_skipUntil = -1.0;
     bool m_draining = false;
 };
 
