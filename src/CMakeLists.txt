@@ -4,11 +4,17 @@ qt_add_executable(hopline
     app/MainWindow.h
     app/PreviewWidget.cpp
     app/PreviewWidget.h
+    engine/AudioOutput.cpp
+    engine/AudioOutput.h
     engine/Clock.h
     engine/FrameQueue.cpp
     engine/FrameQueue.h
     engine/Player.cpp
     engine/Player.h
+    engine/RingBuffer.cpp
+    engine/RingBuffer.h
+    media/AudioDecoder.cpp
+    media/AudioDecoder.h
     media/MediaProbe.cpp
     media/MediaProbe.h
     media/VideoDecoder.cpp
@@ -16,7 +22,9 @@ qt_add_executable(hopline
     media/VideoFrame.h
 )
 
-target_include_directories(hopline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+find_path(MINIAUDIO_INCLUDE_DIRS "miniaudio.h" REQUIRED)
+
+target_include_directories(hopline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${MINIAUDIO_INCLUDE_DIRS})
 target_link_libraries(hopline PRIVATE Qt6::Widgets PkgConfig::FFMPEG)
 
 set_target_properties(hopline PROPERTIES WIN32_EXECUTABLE ON)

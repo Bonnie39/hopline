@@ -3,6 +3,7 @@
   "name": "hopline",
   "version": "0.0.1",
   "dependencies": [
+    "miniaudio",
     {
       "name": "ffmpeg",
       "default-features": false,

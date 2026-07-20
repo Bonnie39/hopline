@@ -147,10 +147,12 @@ void MainWindow::tick()
     // One extra refresh after stopping, so the final position actually gets painted.
     const bool playing = m_player->isPlaying();
     if (playing || m_wasPlaying) {
-        statusBar()->showMessage(QString("%1 / %2 s   dropped %3")
+        statusBar()->showMessage(QString("%1 / %2 s   dropped %3   underruns %4   clock: %5")
                                      .arg(m_player->position(), 0, 'f', 2)
                                      .arg(m_player->duration(), 0, 'f', 2)
-                                     .arg(m_player->droppedFrames()));
+                                     .arg(m_player->droppedFrames())
+                                     .arg(m_player->underruns())
+                                     .arg(m_player->hasAudio() ? "audio" : "wall"));
     }
     m_wasPlaying = playing;
 }

@@ -1,6 +1,8 @@
 #include "engine/Player.h"
 
+#include <chrono>
 #include <utility>
+#include <vector>
 
 namespace hopline {
 namespace {
@@ -8,6 +10,9 @@ namespace {
 // Deep enough to absorb decode jitter, shallow enough that 4K frames don't blow
 // up memory. Revisit when frames live on the GPU.
 constexpr size_t kQueueDepth = 8;
+
+constexpr int kSampleRate = 48000;
+constexpr int kChannels = 2;
 
 }  // namespace
 
@@ -22,8 +27,16 @@ bool Player::open(const std::string& path, std::string& error)
 {
     close();
 
-    if (!m_decoder.open(path, error)) {
+    if (!m_video.open(path, error)) {
         return false;
+    }
+
+    // Audio is optional: a file without it just falls back to the wall clock.
+    std::string audioError;
+    if (m_audio.open(path, kSampleRate, kChannels, audioError)) {
+        if (!m_audioOut.open(kSampleRate, kChannels, audioError)) {
+            m_audio.close();
+        }
     }
 
     m_eof = false;
@@ -31,14 +44,20 @@ bool Player::open(const std::string& path, std::string& error)
     m_dropped = 0;
     m_clock.reset(0.0);
     m_queue.reopen();
-    m_thread = std::thread(&Player::decodeLoop, this);
+
+    m_videoThread = std::thread(&Player::videoLoop, this);
+    if (m_audioOut.isOpen()) {
+        m_audioThread = std::thread(&Player::audioLoop, this);
+    }
     return true;
 }
 
 void Player::close()
 {
-    stopThread();
-    m_decoder.close();
+    stopThreads();
+    m_audioOut.close();
+    m_audio.close();
+    m_video.close();
     m_queue.clear();
     m_clock.pause();
     m_clock.reset(0.0);
@@ -46,23 +65,28 @@ void Player::close()
     m_dropped = 0;
 }
 
-void Player::stopThread()
+void Player::stopThreads()
 {
-    if (!m_thread.joinable()) {
-        return;
-    }
     m_stop = true;
     m_queue.close();  // unblocks a decoder parked on a full queue
-    m_thread.join();
+    m_audioOut.setPaused(true);
+
+    if (m_videoThread.joinable()) {
+        m_videoThread.join();
+    }
+    if (m_audioThread.joinable()) {
+        m_audioThread.join();
+    }
+
     m_queue.reopen();
     m_stop = false;
 }
 
-void Player::decodeLoop()
+void Player::videoLoop()
 {
     while (!m_stop) {
         VideoFrame frame;
-        if (!m_decoder.nextFrame(frame)) {
+        if (!m_video.nextFrame(frame)) {
             m_eof = true;
             return;
         }
@@ -72,27 +96,70 @@ void Player::decodeLoop()
     }
 }
 
+void Player::audioLoop()
+{
+    std::vector<float> chunk;
+    size_t consumed = 0;
+
+    while (!m_stop) {
+        if (consumed >= chunk.size()) {
+            chunk.clear();
+            consumed = 0;
+            if (!m_audio.nextChunk(chunk)) {
+                m_audioOut.setEndOfStream(true);
+                return;
+            }
+            if (chunk.empty()) {
+                continue;
+            }
+        }
+
+        const size_t written = m_audioOut.buffer().write(chunk.data() + consumed, chunk.size() - consumed);
+        consumed += written;
+        if (written == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));  // ring full
+        }
+    }
+}
+
 void Player::play()
 {
-    if (isOpen() && !atEnd()) {
+    if (!isOpen() || atEnd()) {
+        return;
+    }
+    if (m_audioOut.isOpen()) {
+        m_audioOut.setPaused(false);
+    } else {
         m_clock.start();
     }
 }
 
-void Player::pause() { m_clock.pause(); }
+void Player::pause()
+{
+    if (m_audioOut.isOpen()) {
+        m_audioOut.setPaused(true);
+    } else {
+        m_clock.pause();
+    }
+}
 
 void Player::togglePlay()
 {
-    if (m_clock.running()) {
+    if (isPlaying()) {
         pause();
     } else {
         play();
     }
 }
 
+bool Player::isPlaying() const
+{
+    return m_audioOut.isOpen() ? m_audioOut.isRunning() : m_clock.running();
+}
+
 bool Player::update(VideoFrame& out)
 {
-    const double now = m_clock.seconds();
+    const double now = position();
     bool got = false;
     double pts = 0.0;
 
@@ -112,7 +179,7 @@ bool Player::update(VideoFrame& out)
     // frame is popped: that frame still owes its own display time, and audio can
     // outlast video.
     if (m_eof && m_queue.size() == 0 && now >= duration()) {
-        m_clock.pause();
+        pause();
         m_clock.reset(duration());
     }
 
@@ -122,7 +189,7 @@ bool Player::update(VideoFrame& out)
 double Player::position() const
 {
     const double total = duration();
-    const double now = m_clock.seconds();
+    const double now = m_audioOut.isOpen() ? m_audioOut.position() : m_clock.seconds();
     return total > 0.0 && now > total ? total : now;
 }
 
