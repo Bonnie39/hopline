@@ -189,6 +189,10 @@ MainWindow::MainWindow(QWidget* parent)
         m_project.setFolderLabel(folder, label);
         m_browser->refresh();
     });
+    connect(m_browser, &MediaBrowser::folderRenamed, this, [this](FolderId folder, const QString& name) {
+        m_project.renameFolder(folder, name.toStdString());
+        m_browser->refresh();
+    });
     connect(m_browser, &MediaBrowser::mediaSelected, this, &MainWindow::showMediaInfo);
     m_browserDock = new QDockWidget("Media", this);
     m_browserDock->setObjectName("mediaDock");
@@ -472,12 +476,11 @@ void MainWindow::importMediaDialog(FolderId folder)
 
 void MainWindow::onNewFolder(FolderId parent)
 {
-    bool ok = false;
-    const QString name = QInputDialog::getText(this, "New Folder", "Name:", QLineEdit::Normal, "New Folder", &ok);
-    if (ok && !name.isEmpty()) {
-        m_project.addFolder(parent, name.toStdString());
-        m_browser->refresh();
-    }
+    // Create with a placeholder name, then drop straight into inline rename
+    // (Finder/Premiere style) instead of prompting up front.
+    const FolderId id = m_project.addFolder(parent, "New Folder");
+    m_browser->refresh();
+    m_browser->beginRenameFolder(id);
 }
 
 void MainWindow::onDeleteFolder(FolderId folder)

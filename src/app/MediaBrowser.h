@@ -50,6 +50,9 @@ public:
 
     FolderId currentFolder() const { return m_current; }
 
+    // Selects the folder in the active view and starts an inline rename edit.
+    void beginRenameFolder(FolderId folder);
+
 signals:
     void newFolderRequested(FolderId parent);
     void importRequested(FolderId folder);
@@ -60,6 +63,7 @@ signals:
     void deleteMediaRequested(QList<MediaId> media);
     void mediaLabelChanged(QList<MediaId> media, int label);
     void folderLabelChanged(FolderId folder, int label);
+    void folderRenamed(FolderId folder, QString name);
 
 private:
     class IconView;
@@ -75,6 +79,7 @@ private:
     void dropOnFolder(const QList<MediaId>& ids, FolderId folder);
     void dropFiles(const QStringList& paths, FolderId folder);
     void showMenu(const QPoint& globalPos, const QList<MediaId>& media, FolderId folderUnderCursor);
+    void commitRename(FolderId folder, const QString& name);
 
     void setIconMode(bool icon);
     void setThumbSize(int width);

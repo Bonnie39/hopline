@@ -10,9 +10,11 @@
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QFileInfo>
+#include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -23,6 +25,7 @@
 #include <QPainterPath>
 #include <QPixmap>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSlider>
 #include <QStackedWidget>
 #include <QStyle>
@@ -186,6 +189,14 @@ public:
     }
     void setThumbWidth(int w) { m_thumbWidth = w; }
 
+    // Put the rename editor over the name area, not the whole tile.
+    void updateEditorGeometry(QWidget* editor, const QStyleOptionViewItem& option,
+                              const QModelIndex&) const override
+    {
+        const QRect r = option.rect;
+        editor->setGeometry(r.left() + kPad, thumbRect(r).bottom() + 4, r.width() - 2 * kPad, kNameH);
+    }
+
     QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex&) const override
     {
         const int tileW = m_thumbWidth + 2 * kPad;
@@ -311,6 +322,7 @@ public:
         setDragDropMode(QAbstractItemView::DropOnly);  // drags started by hand below
         setAcceptDrops(true);
         viewport()->setAcceptDrops(true);  // external file drops land on the viewport
+        setEditTriggers(QAbstractItemView::NoEditTriggers);  // rename is driven explicitly
         setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
         setMouseTracking(true);
         viewport()->setMouseTracking(true);
@@ -321,6 +333,35 @@ protected:
     {
         if (event->button() == Qt::LeftButton) m_pressPos = event->pos();
         QListWidget::mousePressEvent(event);
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent* event) override
+    {
+        QListWidgetItem* item = itemAt(event->pos());
+        if (item && item->data(kTypeRole).toInt() == kFolderType) {
+            // Double-click the name label renames; double-click the thumbnail enters.
+            const QRect r = visualItemRect(item);
+            const QRect nameRect(r.left() + kPad, thumbRect(r).bottom() + 4, r.width() - 2 * kPad, kNameH);
+            if (nameRect.contains(event->pos())) {
+                editItem(item);
+            } else {
+                m_owner->enterFolder(static_cast<FolderId>(item->data(kIdRole).toULongLong()));
+            }
+            return;
+        }
+        QListWidget::mouseDoubleClickEvent(event);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if (event->key() == Qt::Key_F2) {
+            if (QListWidgetItem* item = currentItem();
+                item && item->data(kTypeRole).toInt() == kFolderType) {
+                editItem(item);
+                return;
+            }
+        }
+        QListWidget::keyPressEvent(event);
     }
 
     void mouseMoveEvent(QMouseEvent* event) override
@@ -491,6 +532,7 @@ public:
         setDragDropMode(QAbstractItemView::DropOnly);
         setAcceptDrops(true);
         viewport()->setAcceptDrops(true);  // external file drops land on the viewport
+        setEditTriggers(QAbstractItemView::NoEditTriggers);  // rename is driven explicitly
         header()->setSectionResizeMode(kColName, QHeaderView::Stretch);
         header()->setSectionResizeMode(kColPath, QHeaderView::Interactive);
     }
@@ -500,6 +542,18 @@ protected:
     {
         if (event->button() == Qt::LeftButton) m_pressPos = event->pos();
         QTreeWidget::mousePressEvent(event);
+    }
+
+    void keyPressEvent(QKeyEvent* event) override
+    {
+        if (event->key() == Qt::Key_F2) {
+            if (QTreeWidgetItem* item = currentItem();
+                item && item->data(0, kTypeRole).toInt() == kFolderType) {
+                editItem(item, kColName);
+                return;
+            }
+        }
+        QTreeWidget::keyPressEvent(event);
     }
 
     void mouseMoveEvent(QMouseEvent* event) override
@@ -585,7 +639,6 @@ MediaBrowser::MediaBrowser(QWidget* parent)
     m_filter = new QLineEdit(this);
     m_filter->setPlaceholderText("Filter…");
     m_filter->setClearButtonEnabled(true);
-    m_filter->setMaximumWidth(180);
     connect(m_filter, &QLineEdit::textChanged, this, [this](const QString& text) {
         m_filterText = text.trimmed();
         populate();
@@ -631,27 +684,30 @@ MediaBrowser::MediaBrowser(QWidget* parent)
     m_viewButton->setAutoRaise(true);
     connect(m_viewButton, &QToolButton::clicked, this, [this] { setIconMode(!m_iconMode); });
 
-    auto* bar = new QHBoxLayout;
-    bar->setContentsMargins(4, 2, 4, 2);
-    bar->setSpacing(4);
-    bar->addWidget(m_upButton);
-    bar->addWidget(m_breadcrumb, 1);
-    bar->addWidget(m_filter);
-    bar->addWidget(m_sortButton);
-    bar->addWidget(m_sizeSlider);
-    bar->addWidget(m_viewButton);
+    // Row 1: breadcrumb navigation (its own line, so it can't squish the search).
+    auto* navBar = new QHBoxLayout;
+    navBar->setContentsMargins(6, 4, 6, 2);
+    navBar->setSpacing(4);
+    navBar->addWidget(m_upButton);
+    navBar->addWidget(m_breadcrumb, 1);
+
+    // Row 2: full-width search/filter.
+    auto* searchBar = new QHBoxLayout;
+    searchBar->setContentsMargins(6, 0, 6, 4);
+    searchBar->addWidget(m_filter);
 
     m_iconView = new IconView(this);
     m_delegate = new TileDelegate(this);
     m_delegate->setThumbWidth(m_thumbWidth);
     m_iconView->setItemDelegate(m_delegate);
-    connect(m_iconView, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem* item) {
-        if (item && item->data(kTypeRole).toInt() == kFolderType)
-            enterFolder(static_cast<FolderId>(item->data(kIdRole).toULongLong()));
-    });
+    // Enter vs. rename on double-click is decided by region in IconView itself.
     connect(m_iconView, &QListWidget::itemSelectionChanged, this, [this] {
         const auto ids = IconView::selectedMedia(m_iconView);
         reportSelection(ids.isEmpty() ? kInvalidMedia : ids.front());
+    });
+    connect(m_iconView, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) {
+        if (item->data(kTypeRole).toInt() == kFolderType)
+            commitRename(static_cast<FolderId>(item->data(kIdRole).toULongLong()), item->text());
     });
 
     m_listView = new ListView(this);
@@ -663,16 +719,48 @@ MediaBrowser::MediaBrowser(QWidget* parent)
         const auto ids = IconView::selectedMedia(m_listView);
         reportSelection(ids.isEmpty() ? kInvalidMedia : ids.front());
     });
+    connect(m_listView, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column) {
+        if (column == kColName && item->data(0, kTypeRole).toInt() == kFolderType)
+            commitRename(static_cast<FolderId>(item->data(0, kIdRole).toULongLong()), item->text(kColName));
+    });
 
     m_stack = new QStackedWidget(this);
     m_stack->addWidget(m_iconView);
     m_stack->addWidget(m_listView);
 
+    // Bottom action bar — Premiere-style: view controls on the left, New Bin on
+    // the right.
+    auto* newBin = new QToolButton(this);
+    newBin->setIcon(QIcon(folderPixmap(16)));
+    newBin->setToolTip("New Bin");
+    newBin->setAutoRaise(true);
+    connect(newBin, &QToolButton::clicked, this, [this] { emit newFolderRequested(m_current); });
+
+    auto* bottomBar = new QHBoxLayout;
+    bottomBar->setContentsMargins(6, 3, 6, 3);
+    bottomBar->setSpacing(6);
+    bottomBar->addWidget(m_viewButton);
+    bottomBar->addWidget(m_sortButton);
+    bottomBar->addWidget(m_sizeSlider);
+    bottomBar->addStretch(1);
+    bottomBar->addWidget(newBin);
+
+    auto* topLine = new QFrame(this);
+    topLine->setFrameShape(QFrame::HLine);
+    topLine->setStyleSheet("color: #3a3c42;");
+    auto* bottomLine = new QFrame(this);
+    bottomLine->setFrameShape(QFrame::HLine);
+    bottomLine->setStyleSheet("color: #3a3c42;");
+
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    layout->addLayout(bar);
+    layout->addLayout(navBar);
+    layout->addLayout(searchBar);
+    layout->addWidget(topLine);
     layout->addWidget(m_stack);
+    layout->addWidget(bottomLine);
+    layout->addLayout(bottomBar);
 
     // Restore view prefs.
     QSettings settings;
@@ -750,6 +838,41 @@ void MediaBrowser::goUp()
 
 void MediaBrowser::reportSelection(MediaId primary) { emit mediaSelected(primary); }
 
+void MediaBrowser::beginRenameFolder(FolderId folder)
+{
+    if (m_iconMode) {
+        for (int i = 0; i < m_iconView->count(); ++i) {
+            QListWidgetItem* item = m_iconView->item(i);
+            if (item->data(kTypeRole).toInt() == kFolderType
+                && item->data(kIdRole).toULongLong() == folder) {
+                m_iconView->setCurrentItem(item);
+                m_iconView->editItem(item);
+                return;
+            }
+        }
+    } else {
+        for (int i = 0; i < m_listView->topLevelItemCount(); ++i) {
+            QTreeWidgetItem* item = m_listView->topLevelItem(i);
+            if (item->data(0, kTypeRole).toInt() == kFolderType
+                && item->data(0, kIdRole).toULongLong() == folder) {
+                m_listView->setCurrentItem(item);
+                m_listView->editItem(item, kColName);
+                return;
+            }
+        }
+    }
+}
+
+void MediaBrowser::commitRename(FolderId folder, const QString& name)
+{
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty()) {
+        refresh();  // reject empty; revert the label to the model's name
+        return;
+    }
+    emit folderRenamed(folder, trimmed);
+}
+
 void MediaBrowser::startMediaDrag(QAbstractItemView* view, const QList<MediaId>& ids, MediaId primary,
                                   const QPixmap& pixmap)
 {
@@ -807,9 +930,11 @@ void MediaBrowser::showMenu(const QPoint& globalPos, const QList<MediaId>& media
 
     QAction* del = labelMedia ? menu.addAction(media.size() > 1 ? "Delete Items" : "Delete") : nullptr;
 
+    QAction* rename = nullptr;
     QAction* delFolder = nullptr;
     if (folderUnderCursor != 0) {
         menu.addSeparator();
+        rename = menu.addAction("Rename");
         delFolder = menu.addAction("Delete Folder");
     }
 
@@ -821,6 +946,8 @@ void MediaBrowser::showMenu(const QPoint& globalPos, const QList<MediaId>& media
         emit importRequested(m_current);
     } else if (del && chosen == del) {
         emit deleteMediaRequested(media);
+    } else if (rename && chosen == rename) {
+        beginRenameFolder(folderUnderCursor);
     } else if (delFolder && chosen == delFolder) {
         emit deleteFolderRequested(folderUnderCursor);
     } else if (labelActions.contains(chosen)) {
@@ -841,6 +968,11 @@ void MediaBrowser::refresh()
 
 void MediaBrowser::populate()
 {
+    // Rebuilding sets item text/data, which would fire itemChanged and be mistaken
+    // for a rename; silence both views while we repopulate.
+    const QSignalBlocker blockIcon(m_iconView);
+    const QSignalBlocker blockList(m_listView);
+
     m_iconView->clear();
     m_listView->clear();
     if (!m_project) return;
@@ -896,14 +1028,16 @@ void MediaBrowser::addFolderRow(const BinFolder& folder)
     icon->setData(kTypeRole, kFolderType);
     icon->setData(kIdRole, id);
     icon->setData(kLabelRole, folder.label);
-    icon->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDropEnabled);
+    icon->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDropEnabled
+                   | Qt::ItemIsEditable);
 
     auto* row = new BinItem(m_listView);
     row->setData(0, kTypeRole, kFolderType);
     row->setData(0, kIdRole, id);
     row->setIcon(kColName, QIcon(folderPixmap(16, color)));
     row->setText(kColName, name);
-    row->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDropEnabled);
+    row->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDropEnabled
+                  | Qt::ItemIsEditable);
 }
 
 void MediaBrowser::addMediaRow(const MediaSource& m)
