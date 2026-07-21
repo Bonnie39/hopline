@@ -32,7 +32,9 @@ void CommandStack::redo(Project& project)
     }
     CommandPtr command = std::move(m_undone.back());
     m_undone.pop_back();
-    command->apply(project);
+    if (!command->apply(project)) {
+        return;  // dropping it beats leaving the stacks out of step with the project
+    }
     m_done.push_back(std::move(command));
 }
 

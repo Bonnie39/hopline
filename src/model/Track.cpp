@@ -16,7 +16,8 @@ bool Track::isFree(const TimeRange& range, ClipId ignore) const
 
 bool Track::insert(const Clip& clip)
 {
-    if (clip.duration <= 0 || !isFree(clip.range())) {
+    // Duplicate ids would make find/remove ambiguous and silently corrupt undo.
+    if (clip.duration <= 0 || clip.id == kInvalidClip || find(clip.id) || !isFree(clip.range())) {
         return false;
     }
 

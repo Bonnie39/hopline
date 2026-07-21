@@ -58,6 +58,27 @@ TEST_CASE("rejected insert leaves the track untouched", "[track]")
     CHECK(track.clips()[0].id == before[0].id);
 }
 
+TEST_CASE("duplicate clip ids are rejected", "[track]")
+{
+    Track track(Track::Kind::Video, "V1");
+    REQUIRE(track.insert(makeClip(1, 0, 1000)));
+
+    // Doesn't overlap, but reusing the id would make find/remove ambiguous.
+    CHECK_FALSE(track.insert(makeClip(1, 5000, 1000)));
+    CHECK(track.clips().size() == 1);
+
+    // Removing frees the id for reuse.
+    REQUIRE(track.remove(1));
+    CHECK(track.insert(makeClip(1, 5000, 1000)));
+}
+
+TEST_CASE("clips must carry a valid id", "[track]")
+{
+    Track track(Track::Kind::Video, "V1");
+    CHECK_FALSE(track.insert(makeClip(kInvalidClip, 0, 1000)));
+    CHECK(track.empty());
+}
+
 TEST_CASE("clipAt finds the covering clip", "[track]")
 {
     Track track(Track::Kind::Video, "V1");

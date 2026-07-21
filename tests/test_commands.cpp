@@ -231,6 +231,54 @@ TEST_CASE("splitting at a clip edge is rejected", "[commands]")
     CHECK(project.sequence().track(0).clips().size() == 1);
 }
 
+TEST_CASE("clips cannot be placed at negative timeline positions", "[commands]")
+{
+    Project project;
+    CommandStack stack;
+    const MediaId source = addSource(project);
+
+    CHECK_FALSE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, -500, 1000))));
+    CHECK(project.sequence().track(0).empty());
+
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 1000, 1000, 100))));
+    const ClipId id = project.sequence().track(0).clips()[0].id;
+    const Snapshot before = snapshot(project);
+
+    CHECK_FALSE(stack.execute(project, std::make_unique<MoveClipCommand>(0, id, 0, -1)));
+    // Head trim far enough left would drag the clip before zero.
+    CHECK_FALSE(stack.execute(project,
+                              std::make_unique<TrimClipCommand>(0, id, TrimClipCommand::Edge::Head, -2000)));
+    CHECK(snapshot(project) == before);
+}
+
+TEST_CASE("clips cannot extend past the end of their source", "[commands]")
+{
+    Project project;
+    CommandStack stack;
+    const MediaId source = addSource(project, 1000);  // source is only 1000 ticks long
+
+    CHECK_FALSE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 0, 1500))));
+    CHECK_FALSE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 0, 600, 500))));
+    CHECK(project.sequence().track(0).empty());
+
+    // Exactly reaching the end is fine.
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 0, 500, 500))));
+    const ClipId id = project.sequence().track(0).clips()[0].id;
+
+    // Extending the tail would run past the source.
+    CHECK_FALSE(stack.execute(project,
+                              std::make_unique<TrimClipCommand>(0, id, TrimClipCommand::Edge::Tail, 1)));
+}
+
+TEST_CASE("clips referencing unknown media are rejected", "[commands]")
+{
+    Project project;
+    CommandStack stack;
+
+    CHECK_FALSE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(999, 0, 1000))));
+    CHECK(project.sequence().track(0).empty());
+}
+
 TEST_CASE("a new edit clears the redo branch", "[commands]")
 {
     Project project;

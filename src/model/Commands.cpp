@@ -3,10 +3,24 @@
 #include "model/Project.h"
 
 namespace hopline {
+namespace {
+
+// A clip must sit at a non-negative timeline position and stay inside its
+// source, or playback would resolve to source time that doesn't exist.
+bool isPlaceable(const Project& project, const Clip& clip)
+{
+    if (clip.duration <= 0 || clip.timelineStart < 0 || clip.sourceIn < 0) {
+        return false;
+    }
+    const MediaSource* media = project.media(clip.source);
+    return media != nullptr && clip.sourceIn + clip.duration <= media->duration;
+}
+
+}  // namespace
 
 bool AddClipCommand::apply(Project& project)
 {
-    if (m_track >= project.sequence().trackCount()) {
+    if (m_track >= project.sequence().trackCount() || !isPlaceable(project, m_clip)) {
         return false;
     }
     if (m_clip.id == kInvalidClip) {
@@ -50,6 +64,9 @@ bool MoveClipCommand::apply(Project& project)
 
     Clip moved = m_original;
     moved.timelineStart = m_newStart;
+    if (!isPlaceable(project, moved)) {
+        return false;
+    }
 
     // Ignore the clip itself only when it isn't leaving the track.
     const ClipId ignore = m_from == m_to ? m_id : kInvalidClip;
@@ -90,7 +107,7 @@ bool TrimClipCommand::apply(Project& project)
         trimmed.duration += m_delta;
     }
 
-    if (trimmed.duration <= 0 || trimmed.sourceIn < 0) {
+    if (!isPlaceable(project, trimmed)) {
         return false;
     }
     if (!sequence.track(m_track).isFree(trimmed.range(), m_id)) {

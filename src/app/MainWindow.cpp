@@ -12,7 +12,9 @@
 #include <QVBoxLayout>
 
 #include "app/PreviewWidget.h"
+#include "app/TimelineWidget.h"
 #include "media/MediaProbe.h"
+#include "model/Commands.h"
 
 namespace hopline {
 namespace {
@@ -42,6 +44,28 @@ QString formatDuration(double seconds)
         .arg(total / 3600, 2, 10, QChar('0'))
         .arg((total / 60) % 60, 2, 10, QChar('0'))
         .arg(total % 60, 2, 10, QChar('0'));
+}
+
+MediaSource toMediaSource(const MediaInfo& info)
+{
+    MediaSource source;
+    source.path = info.path;
+    source.duration = ticksFromSeconds(info.duration);
+
+    for (const StreamInfo& stream : info.streams) {
+        if (stream.type == "video" && !source.hasVideo) {
+            source.hasVideo = true;
+            source.width = stream.width;
+            source.height = stream.height;
+            source.rateNum = stream.rateNum;
+            source.rateDen = stream.rateDen;
+        } else if (stream.type == "audio" && !source.hasAudio) {
+            source.hasAudio = true;
+            source.sampleRate = stream.sampleRate;
+            source.channels = stream.channels;
+        }
+    }
+    return source;
 }
 
 QString describe(const MediaInfo& info)
@@ -107,11 +131,18 @@ MainWindow::MainWindow(QWidget* parent)
     layout->addWidget(m_seekBar);
     setCentralWidget(central);
 
+    m_timeline = new TimelineWidget(this);
+    m_timeline->setProject(&m_project);
+    connect(m_timeline, &TimelineWidget::playheadDragged, this, &MainWindow::timelineScrubbed);
+    auto* timelineDock = new QDockWidget("Timeline", this);
+    timelineDock->setWidget(m_timeline);
+    addDockWidget(Qt::BottomDockWidgetArea, timelineDock);
+
     m_log = new QPlainTextEdit(this);
     m_log->setReadOnly(true);
     auto* logDock = new QDockWidget("Media Info", this);
     logDock->setWidget(m_log);
-    addDockWidget(Qt::BottomDockWidgetArea, logDock);
+    addDockWidget(Qt::RightDockWidgetArea, logDock);
 
     auto* fileMenu = menuBar()->addMenu("&File");
     fileMenu->addAction("&Open...", QKeySequence::Open, this, &MainWindow::openFile);
@@ -169,9 +200,44 @@ void MainWindow::load(const QString& path)
         return;
     }
 
+    // Import into the project: one media source, and a clip on each track
+    // spanning the whole file. Goes through commands so it lands on the undo stack.
+    const MediaSource source = toMediaSource(*info);
+    const MediaId mediaId = m_project.addMedia(source);
+
+    if (source.rateNum > 0) {
+        m_project.sequence().setFrameRate(source.rateNum, source.rateDen);
+    }
+    if (source.width > 0) {
+        m_project.sequence().setResolution(source.width, source.height);
+    }
+
+    Clip clip;
+    clip.source = mediaId;
+    clip.timelineStart = 0;
+    clip.sourceIn = 0;
+    clip.duration = source.duration;
+
+    if (source.hasVideo) {
+        m_commands.execute(m_project, std::make_unique<AddClipCommand>(0, clip));
+    }
+    if (source.hasAudio) {
+        m_commands.execute(m_project, std::make_unique<AddClipCommand>(1, clip));
+    }
+
+    m_timeline->setPlayhead(0);
+    m_timeline->zoomToFit();
+
     m_seekBar->setEnabled(true);
     m_seekBar->setValue(0);
     statusBar()->showMessage(QString("Loaded %1  —  space to play").arg(path));
+}
+
+void MainWindow::timelineScrubbed(Tick time)
+{
+    if (m_player) {
+        m_player->seek(secondsFromTicks(time));
+    }
 }
 
 void MainWindow::seekRelative(double seconds)
@@ -211,6 +277,8 @@ void MainWindow::tick()
         const QSignalBlocker blocker(m_seekBar);
         m_seekBar->setValue(static_cast<int>(m_player->position() / m_player->duration() * kSeekResolution));
     }
+
+    m_timeline->setPlayhead(ticksFromSeconds(m_player->position()));
 
     // One extra refresh after stopping, so the final position actually gets painted.
     const bool playing = m_player->isPlaying();

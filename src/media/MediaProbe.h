@@ -14,6 +14,8 @@ struct StreamInfo {
     int width = 0;           // video only
     int height = 0;          // video only
     double frameRate = 0.0;  // video only
+    int rateNum = 0;         // same rate as an exact rational (30000/1001 for NTSC)
+    int rateDen = 1;
     int sampleRate = 0;      // audio only
     int channels = 0;        // audio only
     int64_t bitRate = 0;

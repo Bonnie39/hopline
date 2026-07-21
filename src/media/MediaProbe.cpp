@@ -61,8 +61,10 @@ std::optional<MediaInfo> probeMedia(const std::string& path, std::string& error)
             s.width = par->width;
             s.height = par->height;
             const AVRational fps = stream->avg_frame_rate;
-            if (fps.den > 0) {
+            if (fps.den > 0 && fps.num > 0) {
                 s.frameRate = av_q2d(fps);
+                s.rateNum = fps.num;
+                s.rateDen = fps.den;
             }
         } else if (par->codec_type == AVMEDIA_TYPE_AUDIO) {
             s.sampleRate = par->sample_rate;
