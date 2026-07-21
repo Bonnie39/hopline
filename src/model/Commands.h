@@ -115,6 +115,27 @@ private:
     std::vector<std::pair<size_t, ClipId>> m_members;  // captured on first apply
 };
 
+// Sets a clip's cosmetic label color. Undo restores the previous label.
+class SetClipLabelCommand : public Command {
+public:
+    SetClipLabelCommand(size_t trackIndex, ClipId id, int label)
+        : m_track(trackIndex)
+        , m_id(id)
+        , m_label(label)
+    {
+    }
+
+    bool apply(Project& project) override;
+    void undo(Project& project) override;
+    std::string name() const override { return "Label Clip"; }
+
+private:
+    size_t m_track;
+    ClipId m_id;
+    int m_label;
+    int m_oldLabel = 0;
+};
+
 // Splits at a timeline instant; the right-hand piece gets a fresh id.
 class SplitClipCommand : public Command {
 public:

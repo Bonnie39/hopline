@@ -43,6 +43,7 @@ private slots:
     void importMediaDialog(FolderId folder);
     void onNewFolder(FolderId parent);
     void onDeleteFolder(FolderId folder);
+    void onDeleteMedia(QList<MediaId> media);
     void onMediaDropped(MediaId media, Tick start);
     void onFileDropped(const QString& path, Tick start);
     void togglePlay();
@@ -53,6 +54,7 @@ private slots:
     void onClipMoved(std::size_t trackIndex, ClipId clip, Tick newStart);
     void onClipTrimmed(std::size_t trackIndex, ClipId clip, bool trimHead, Tick delta);
     void onUnlink(ClipId clip);
+    void onClipLabel(std::size_t trackIndex, ClipId clip, int label);
     void onDeleteClip(std::size_t trackIndex, ClipId clip);
     void undo();
     void redo();
@@ -66,6 +68,7 @@ private:
     void reopenPlayer();
     MediaId importMedia(const QString& path, FolderId folder);
     void placeMedia(MediaId media, Tick start);
+    bool mediaInUse(MediaId id) const;
     void refreshPreviewsForProject();
 
     QTimer* m_timer = nullptr;

@@ -59,6 +59,17 @@ bool Track::setLinkGroup(ClipId id, LinkGroup group)
     return true;
 }
 
+bool Track::setLabel(ClipId id, int label)
+{
+    const auto it = std::find_if(m_clips.begin(), m_clips.end(),
+                                 [id](const Clip& c) { return c.id == id; });
+    if (it == m_clips.end()) {
+        return false;
+    }
+    it->label = label;
+    return true;
+}
+
 const Clip* Track::clipAt(Tick time) const
 {
     for (const Clip& clip : m_clips) {

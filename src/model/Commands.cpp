@@ -145,6 +145,24 @@ void UnlinkGroupCommand::undo(Project& project)
     }
 }
 
+bool SetClipLabelCommand::apply(Project& project)
+{
+    if (m_track >= project.sequence().trackCount()) {
+        return false;
+    }
+    const Clip* clip = project.sequence().track(m_track).find(m_id);
+    if (!clip) {
+        return false;
+    }
+    m_oldLabel = clip->label;
+    return project.sequence().track(m_track).setLabel(m_id, m_label);
+}
+
+void SetClipLabelCommand::undo(Project& project)
+{
+    project.sequence().track(m_track).setLabel(m_id, m_oldLabel);
+}
+
 bool SplitClipCommand::apply(Project& project)
 {
     Sequence& sequence = project.sequence();

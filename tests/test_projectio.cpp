@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdio>
 
 #include <catch2/catch_test_macros.hpp>
@@ -32,6 +33,8 @@ Project buildProject()
     const FolderId sub = project.addFolder(kRootFolder, "B-roll");
     const MediaId a = project.addMedia(makeSource(100000), kRootFolder);
     const MediaId b = project.addMedia(makeSource(50000), sub);
+    project.setMediaLabel(a, 4);   // exercise media label round-trip
+    project.setFolderLabel(sub, 5);  // exercise folder label round-trip
     project.sequence().setFrameRate(30000, 1001);
     project.sequence().setResolution(1920, 1080);
 
@@ -42,6 +45,7 @@ Project buildProject()
     v.timelineStart = 0;
     v.duration = 40000;
     v.linkGroup = group;
+    v.label = 3;  // exercise clip label round-trip
     Clip audio = v;
     stack.execute(project, std::make_unique<AddClipCommand>(0, v));
     stack.execute(project, std::make_unique<AddClipCommand>(1, audio));
@@ -66,8 +70,14 @@ TEST_CASE("a project round-trips through serialize/deserialize", "[projectio]")
     std::string error;
     REQUIRE(deserializeProject(json, loaded, error));
 
-    // Folders.
+    // Folders, including label colors.
     REQUIRE(loaded.folders().size() == original.folders().size());
+    for (const BinFolder& f : original.folders()) {
+        const auto it = std::find_if(loaded.folders().begin(), loaded.folders().end(),
+                                     [&](const BinFolder& g) { return g.id == f.id; });
+        REQUIRE(it != loaded.folders().end());
+        CHECK(it->label == f.label);
+    }
 
     // Media pool, ids and metadata preserved.
     REQUIRE(loaded.mediaPool().size() == original.mediaPool().size());
@@ -76,6 +86,7 @@ TEST_CASE("a project round-trips through serialize/deserialize", "[projectio]")
         REQUIRE(l != nullptr);
         CHECK(l->path == m.path);
         CHECK(l->folder == m.folder);
+        CHECK(l->label == m.label);
         CHECK(l->duration == m.duration);
         CHECK(l->rateNum == m.rateNum);
         CHECK(l->rateDen == m.rateDen);
@@ -97,6 +108,7 @@ TEST_CASE("a project round-trips through serialize/deserialize", "[projectio]")
             CHECK(lc[i].sourceIn == oc[i].sourceIn);
             CHECK(lc[i].duration == oc[i].duration);
             CHECK(lc[i].linkGroup == oc[i].linkGroup);
+            CHECK(lc[i].label == oc[i].label);
         }
     }
 }
@@ -139,4 +151,20 @@ TEST_CASE("deserialize rejects junk and wrong versions", "[projectio]")
     std::string error;
     CHECK_FALSE(deserializeProject("not json", project, error));
     CHECK_FALSE(deserializeProject(R"({"version":999})", project, error));
+}
+
+TEST_CASE("a v1 project without labels still loads (forward-compatible)", "[projectio]")
+{
+    const char* v1 = R"({
+        "version": 1,
+        "media": [ { "id": 7, "folder": 1, "path": "C:/a.mp4", "duration": 1000 } ],
+        "sequence": { "rateNum": 30, "rateDen": 1, "width": 1920, "height": 1080, "tracks": [] }
+    })";
+
+    Project loaded;
+    std::string error;
+    REQUIRE(deserializeProject(v1, loaded, error));
+    const MediaSource* m = loaded.media(7);
+    REQUIRE(m != nullptr);
+    CHECK(m->label == 0);  // missing field defaults, no crash
 }

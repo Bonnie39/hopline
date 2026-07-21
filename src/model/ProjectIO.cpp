@@ -10,14 +10,15 @@
 namespace hopline {
 namespace {
 
-constexpr int kFormatVersion = 1;
+constexpr int kFormatVersion = 3;
 
 using nlohmann::json;
 
 json mediaToJson(const MediaSource& m)
 {
     return json{
-        { "id", m.id }, { "folder", m.folder }, { "path", m.path }, { "duration", m.duration },
+        { "id", m.id }, { "folder", m.folder }, { "label", m.label },
+        { "path", m.path }, { "duration", m.duration },
         { "hasVideo", m.hasVideo }, { "hasAudio", m.hasAudio },
         { "width", m.width }, { "height", m.height },
         { "rateNum", m.rateNum }, { "rateDen", m.rateDen },
@@ -30,6 +31,7 @@ MediaSource mediaFromJson(const json& j)
     MediaSource m;
     m.id = j.at("id").get<MediaId>();
     m.folder = j.value("folder", kRootFolder);
+    m.label = j.value("label", 0);
     m.path = j.at("path").get<std::string>();
     m.duration = j.at("duration").get<Tick>();
     m.hasVideo = j.value("hasVideo", false);
@@ -48,6 +50,7 @@ json clipToJson(const Clip& c)
     return json{
         { "id", c.id }, { "source", c.source }, { "timelineStart", c.timelineStart },
         { "sourceIn", c.sourceIn }, { "duration", c.duration }, { "linkGroup", c.linkGroup },
+        { "label", c.label },
     };
 }
 
@@ -60,6 +63,7 @@ Clip clipFromJson(const json& j)
     c.sourceIn = j.at("sourceIn").get<Tick>();
     c.duration = j.at("duration").get<Tick>();
     c.linkGroup = j.value("linkGroup", kNoLink);
+    c.label = j.value("label", 0);
     return c;
 }
 
@@ -71,7 +75,8 @@ std::string serializeProject(const Project& project)
     root["version"] = kFormatVersion;
 
     for (const BinFolder& folder : project.folders()) {
-        root["folders"].push_back({ { "id", folder.id }, { "parent", folder.parent }, { "name", folder.name } });
+        root["folders"].push_back({ { "id", folder.id }, { "parent", folder.parent },
+                                    { "name", folder.name }, { "label", folder.label } });
     }
     for (const MediaSource& media : project.mediaPool()) {
         root["media"].push_back(mediaToJson(media));
@@ -105,7 +110,8 @@ bool deserializeProject(const std::string& text, Project& out, std::string& erro
         error = "not valid JSON";
         return false;
     }
-    if (root.value("version", 0) != kFormatVersion) {
+    const int version = root.value("version", 0);
+    if (version < 1 || version > kFormatVersion) {
         error = "unsupported project version";
         return false;
     }
@@ -114,7 +120,7 @@ bool deserializeProject(const std::string& text, Project& out, std::string& erro
 
     for (const json& jf : root.value("folders", json::array())) {
         out.restoreFolder({ jf.at("id").get<FolderId>(), jf.value("parent", FolderId{ 0 }),
-                            jf.at("name").get<std::string>() });
+                            jf.at("name").get<std::string>(), jf.value("label", 0) });
     }
     for (const json& jm : root.value("media", json::array())) {
         out.restoreMedia(mediaFromJson(jm));

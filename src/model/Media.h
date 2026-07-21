@@ -18,6 +18,7 @@ struct BinFolder {
     FolderId id = 0;
     FolderId parent = 0;  // 0 for the root
     std::string name;
+    int label = 0;  // cosmetic color tag; 0 = none
 };
 
 // What the edit model knows about a file. Probed once on import; the model
@@ -25,6 +26,7 @@ struct BinFolder {
 struct MediaSource {
     MediaId id = kInvalidMedia;
     FolderId folder = kRootFolder;  // which bin folder it lives in
+    int label = 0;                  // cosmetic color tag; 0 = none
     std::string path;
     Tick duration = 0;
 

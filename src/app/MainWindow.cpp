@@ -85,6 +85,9 @@ QString describeMedia(const MediaSource& media)
     if (media.hasAudio) {
         text += QString("\naudio     %1 Hz  %2 ch\n").arg(media.sampleRate).arg(media.channels);
     }
+    if (media.label > 0) {
+        text += QString("\nlabel     %1\n").arg(labelName(media.label));
+    }
     return text;
 }
 
@@ -147,6 +150,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_timeline, &TimelineWidget::clipMoved, this, &MainWindow::onClipMoved);
     connect(m_timeline, &TimelineWidget::clipTrimmed, this, &MainWindow::onClipTrimmed);
     connect(m_timeline, &TimelineWidget::unlinkRequested, this, &MainWindow::onUnlink);
+    connect(m_timeline, &TimelineWidget::clipLabelRequested, this, &MainWindow::onClipLabel);
     connect(m_timeline, &TimelineWidget::deleteRequested, this, &MainWindow::onDeleteClip);
     connect(m_timeline, &TimelineWidget::selectionChanged, this, [this](ClipId clip) {
         statusBar()->showMessage(clip ? QString("Selected clip %1").arg(clip) : QString("Ready"));
@@ -163,14 +167,27 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_browser, &MediaBrowser::newFolderRequested, this, &MainWindow::onNewFolder);
     connect(m_browser, &MediaBrowser::importRequested, this, &MainWindow::importMediaDialog);
     connect(m_browser, &MediaBrowser::deleteFolderRequested, this, &MainWindow::onDeleteFolder);
-    connect(m_browser, &MediaBrowser::mediaMovedToFolder, this, [this](MediaId media, FolderId folder) {
-        m_project.setMediaFolder(media, folder);
+    connect(m_browser, &MediaBrowser::mediaMovedToFolder, this, [this](QList<MediaId> media, FolderId folder) {
+        for (MediaId id : media) {
+            m_project.setMediaFolder(id, folder);
+        }
         m_browser->refresh();
     });
     connect(m_browser, &MediaBrowser::filesImported, this, [this](const QStringList& paths, FolderId folder) {
         for (const QString& path : paths) {
             importMedia(path, folder);
         }
+    });
+    connect(m_browser, &MediaBrowser::deleteMediaRequested, this, &MainWindow::onDeleteMedia);
+    connect(m_browser, &MediaBrowser::mediaLabelChanged, this, [this](QList<MediaId> media, int label) {
+        for (MediaId id : media) {
+            m_project.setMediaLabel(id, label);
+        }
+        m_browser->refresh();
+    });
+    connect(m_browser, &MediaBrowser::folderLabelChanged, this, [this](FolderId folder, int label) {
+        m_project.setFolderLabel(folder, label);
+        m_browser->refresh();
     });
     connect(m_browser, &MediaBrowser::mediaSelected, this, &MainWindow::showMediaInfo);
     m_browserDock = new QDockWidget("Media", this);
@@ -342,6 +359,7 @@ void MainWindow::placeMedia(MediaId media, Tick start)
     clip.timelineStart = start;
     clip.sourceIn = 0;
     clip.duration = source->duration;
+    clip.label = source->label;  // inherit the bin color; editable on the timeline after
     if (source->hasVideo && source->hasAudio) {
         clip.linkGroup = m_project.nextLinkGroup();
     }
@@ -468,6 +486,36 @@ void MainWindow::onDeleteFolder(FolderId folder)
     m_browser->refresh();
 }
 
+bool MainWindow::mediaInUse(MediaId id) const
+{
+    const Sequence& seq = m_project.sequence();
+    for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+        for (const Clip& clip : seq.track(i).clips()) {
+            if (clip.source == id) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void MainWindow::onDeleteMedia(QList<MediaId> media)
+{
+    int inUse = 0;
+    for (MediaId id : media) {
+        if (mediaInUse(id)) {
+            ++inUse;
+        } else {
+            m_project.removeMedia(id);
+        }
+    }
+    m_browser->refresh();
+    if (inUse > 0) {
+        statusBar()->showMessage(
+            QString("%1 item(s) left in the bin — still used on the timeline.").arg(inUse));
+    }
+}
+
 void MainWindow::onMediaDropped(MediaId media, Tick start)
 {
     placeMedia(media, start);
@@ -552,6 +600,17 @@ void MainWindow::onUnlink(ClipId clip)
     const Clip* c = m_project.sequence().findClip(clip);
     if (c && c->linked()
         && m_commands.execute(m_project, std::make_unique<UnlinkGroupCommand>(c->linkGroup))) {
+        commitEdit();
+    }
+}
+
+void MainWindow::onClipLabel(std::size_t trackIndex, ClipId clip, int label)
+{
+    auto compound = std::make_unique<CompoundCommand>("Label Clip");
+    for (const auto& [track, id] : editTargets(m_project, trackIndex, clip)) {
+        compound->add(std::make_unique<SetClipLabelCommand>(track, id, label));
+    }
+    if (m_commands.execute(m_project, std::move(compound))) {
         commitEdit();
     }
 }

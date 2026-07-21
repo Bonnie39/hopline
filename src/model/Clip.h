@@ -25,6 +25,10 @@ struct Clip {
     // and audio halves). kNoLink means the clip is independent.
     LinkGroup linkGroup = kNoLink;
 
+    // Cosmetic color tag (0 = none). Inherited from the source media at placement,
+    // then editable on the timeline independently of the media's browser color.
+    int label = 0;
+
     bool linked() const { return linkGroup != kNoLink; }
 
     TimeRange range() const { return { timelineStart, duration }; }

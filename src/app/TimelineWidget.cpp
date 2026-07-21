@@ -6,11 +6,13 @@
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QFileInfo>
+#include <QIcon>
 #include <QMenu>
 #include <QMimeData>
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPixmap>
 #include <QUrl>
 #include <QWheelEvent>
 
@@ -410,6 +412,26 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event)
     QMenu menu(this);
     QAction* unlink = menu.addAction("Unlink");
     unlink->setEnabled(clip && clip->linked());
+
+    QMenu* labelMenu = menu.addMenu("Label");
+    QList<QAction*> labelActions;
+    QAction* none = labelMenu->addAction("None");
+    none->setData(0);
+    labelActions << none;
+    for (int i = 1; i <= labelCount(); ++i) {
+        QPixmap sw(14, 14);
+        sw.fill(Qt::transparent);
+        QPainter p(&sw);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.setPen(Qt::NoPen);
+        p.setBrush(labelColor(i));
+        p.drawRoundedRect(QRectF(0.5, 0.5, 13, 13), 3, 3);
+        p.end();
+        QAction* a = labelMenu->addAction(QIcon(sw), labelName(i));
+        a->setData(i);
+        labelActions << a;
+    }
+
     menu.addSeparator();
     QAction* remove = menu.addAction("Delete Clip");
 
@@ -418,6 +440,8 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event)
         emit unlinkRequested(hit.clip);
     } else if (chosen == remove) {
         emit deleteRequested(hit.trackIndex, hit.clip);
+    } else if (labelActions.contains(chosen)) {
+        emit clipLabelRequested(hit.trackIndex, hit.clip, chosen->data().toInt());
     }
 }
 
@@ -626,7 +650,8 @@ void TimelineWidget::drawTracks(QPainter& painter)
                 box.setWidth(1);
             }
 
-            const QColor fill = isVideo ? kClipVideo : kClipAudio;
+            const QColor fill = clip.label > 0 ? labelColor(clip.label)
+                                               : (isVideo ? kClipVideo : kClipAudio);
             painter.setPen(Qt::NoPen);
             painter.setBrush(fill);
             painter.drawRoundedRect(box, 3, 3);
@@ -709,7 +734,8 @@ void TimelineWidget::drawWaveform(QPainter& painter, const Clip& clip, const QRe
     const double halfH = box.height() / 2.0 - 2.0;
     painter.save();
     painter.setClipRect(box);
-    painter.setPen(kWaveform);
+    // A lighter shade of the clip's label color, or the default green when unlabeled.
+    painter.setPen(clip.label > 0 ? labelColor(clip.label).lighter(160) : kWaveform);
     for (int x = box.left(); x < box.right(); ++x) {
         const double fraction = std::clamp((x - x0 + 0.5) / fullWidth, 0.0, 1.0);
         const double srcSec = srcStart + fraction * srcSpan;

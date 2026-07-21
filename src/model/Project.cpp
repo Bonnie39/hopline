@@ -44,6 +44,24 @@ void Project::setMediaFolder(MediaId id, FolderId folder)
     }
 }
 
+void Project::setMediaLabel(MediaId id, int label)
+{
+    const auto it = std::find_if(m_media.begin(), m_media.end(),
+                                 [id](const MediaSource& m) { return m.id == id; });
+    if (it != m_media.end()) {
+        it->label = label;
+    }
+}
+
+void Project::removeMedia(MediaId id)
+{
+    const auto it = std::find_if(m_media.begin(), m_media.end(),
+                                 [id](const MediaSource& m) { return m.id == id; });
+    if (it != m_media.end()) {
+        m_media.erase(it);
+    }
+}
+
 FolderId Project::addFolder(FolderId parent, std::string name)
 {
     const FolderId id = ++m_lastFolderId;
@@ -60,6 +78,15 @@ bool Project::renameFolder(FolderId id, std::string name)
     }
     it->name = std::move(name);
     return true;
+}
+
+void Project::setFolderLabel(FolderId id, int label)
+{
+    const auto it = std::find_if(m_folders.begin(), m_folders.end(),
+                                 [id](const BinFolder& f) { return f.id == id; });
+    if (it != m_folders.end()) {
+        it->label = label;
+    }
 }
 
 void Project::removeFolder(FolderId id)

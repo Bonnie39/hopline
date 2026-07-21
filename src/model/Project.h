@@ -22,10 +22,15 @@ public:
     const MediaSource* media(MediaId id) const;
     const std::vector<MediaSource>& mediaPool() const { return m_media; }
     void setMediaFolder(MediaId id, FolderId folder);
+    void setMediaLabel(MediaId id, int label);
+    // Erases a source from the pool. The caller is responsible for ensuring no
+    // clip references it (media edits are non-undoable); ids are never reused.
+    void removeMedia(MediaId id);
 
     const std::vector<BinFolder>& folders() const { return m_folders; }
     FolderId addFolder(FolderId parent, std::string name);
     bool renameFolder(FolderId id, std::string name);
+    void setFolderLabel(FolderId id, int label);
     // Removes a folder; its media and subfolders move up to its parent.
     void removeFolder(FolderId id);
 

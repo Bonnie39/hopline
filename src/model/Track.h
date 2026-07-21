@@ -35,6 +35,8 @@ public:
 
     // Link group doesn't affect ordering or overlap, so it's safe to change in place.
     bool setLinkGroup(ClipId id, LinkGroup group);
+    // Label is cosmetic, so like the link group it's safe to change in place.
+    bool setLabel(ClipId id, int label);
 
     // Whether `range` would fit, ignoring the clip being moved or trimmed.
     bool isFree(const TimeRange& range, ClipId ignore = kInvalidClip) const;

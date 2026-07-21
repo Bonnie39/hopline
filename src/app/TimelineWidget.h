@@ -26,7 +26,7 @@ struct Clip;
 //   clip body           -> select; drag to move
 //   clip edge           -> drag to trim that edge
 //   empty track area    -> clear selection
-//   right-click a clip   -> context menu (unlink / delete)
+//   right-click a clip   -> context menu (unlink / label / delete)
 class TimelineWidget : public QWidget {
     Q_OBJECT
 
@@ -49,6 +49,7 @@ signals:
     void clipMoved(std::size_t trackIndex, ClipId clip, Tick newStart);
     void clipTrimmed(std::size_t trackIndex, ClipId clip, bool trimHead, Tick delta);
     void unlinkRequested(ClipId clip);
+    void clipLabelRequested(std::size_t trackIndex, ClipId clip, int label);
     void deleteRequested(std::size_t trackIndex, ClipId clip);
     void mediaDropped(MediaId media, Tick start);
     void fileDropped(const QString& path, Tick start);
