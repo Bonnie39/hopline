@@ -1,12 +1,15 @@
 #pragma once
 
 #include <QPoint>
+#include <QString>
 #include <QWidget>
 
 #include <vector>
 
 #include "model/Clip.h"
 #include "model/Time.h"
+
+class QMimeData;
 
 namespace hopline {
 
@@ -47,6 +50,8 @@ signals:
     void clipTrimmed(std::size_t trackIndex, ClipId clip, bool trimHead, Tick delta);
     void unlinkRequested(ClipId clip);
     void deleteRequested(std::size_t trackIndex, ClipId clip);
+    void mediaDropped(MediaId media, Tick start);
+    void fileDropped(const QString& path, Tick start);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -55,6 +60,10 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dragLeaveEvent(QDragLeaveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 private:
     enum class Drag { None, Scrub, Move, TrimHead, TrimTail };
@@ -82,7 +91,10 @@ private:
 
     void drawRuler(QPainter& painter);
     void drawTracks(QPainter& painter);
+    void drawDropGhost(QPainter& painter);
     void drawPlayhead(QPainter& painter);
+    void updateDropGhost(const QPoint& pos, const QMimeData* mime);
+    int firstTrackOfKind(bool video) const;
     // Content is mapped by fraction along the clip so it stays aligned under a
     // move/trim preview. srcStart/srcSpan are the source seconds the box covers.
     void drawThumbnails(QPainter& painter, const Clip& clip, const QRect& box, int x0, int fullWidth,
@@ -108,6 +120,13 @@ private:
     bool m_dragMoved = false;
 
     int m_lastPlayheadX = -1;  // repaint only when the playhead crosses a pixel
+
+    // Where a dragged media item would land, shown as a ghost during drag-over.
+    bool m_dropActive = false;
+    Tick m_dropStart = 0;
+    Tick m_dropDuration = 0;
+    bool m_dropVideo = false;
+    bool m_dropAudio = false;
 };
 
 }  // namespace hopline

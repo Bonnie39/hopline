@@ -2,6 +2,10 @@ qt_add_executable(hopline
     main.cpp
     app/MainWindow.cpp
     app/MainWindow.h
+    app/IconButton.cpp
+    app/IconButton.h
+    app/MediaBrowser.cpp
+    app/MediaBrowser.h
     app/PreviewCache.cpp
     app/PreviewCache.h
     app/PreviewWidget.cpp
@@ -32,6 +36,8 @@ qt_add_executable(hopline
     model/Media.h
     model/Project.cpp
     model/Project.h
+    model/ProjectIO.cpp
+    model/ProjectIO.h
     model/Sequence.cpp
     model/Sequence.h
     model/Time.h
@@ -40,9 +46,10 @@ qt_add_executable(hopline
 )
 
 find_path(MINIAUDIO_INCLUDE_DIRS "miniaudio.h" REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 
 target_include_directories(hopline PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${MINIAUDIO_INCLUDE_DIRS})
-target_link_libraries(hopline PRIVATE Qt6::Widgets PkgConfig::FFMPEG)
+target_link_libraries(hopline PRIVATE Qt6::Widgets PkgConfig::FFMPEG nlohmann_json::nlohmann_json)
 
 set_target_properties(hopline PROPERTIES WIN32_EXECUTABLE ON)
 

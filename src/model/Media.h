@@ -10,10 +10,21 @@ namespace hopline {
 using MediaId = uint64_t;
 inline constexpr MediaId kInvalidMedia = 0;
 
+// Media-browser bin folders. The root always exists.
+using FolderId = uint64_t;
+inline constexpr FolderId kRootFolder = 1;
+
+struct BinFolder {
+    FolderId id = 0;
+    FolderId parent = 0;  // 0 for the root
+    std::string name;
+};
+
 // What the edit model knows about a file. Probed once on import; the model
 // never opens it. Deliberately free of FFmpeg types.
 struct MediaSource {
     MediaId id = kInvalidMedia;
+    FolderId folder = kRootFolder;  // which bin folder it lives in
     std::string path;
     Tick duration = 0;
 

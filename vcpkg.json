@@ -5,6 +5,7 @@
   "dependencies": [
     "catch2",
     "miniaudio",
+    "nlohmann-json",
     {
       "name": "ffmpeg",
       "default-features": false,

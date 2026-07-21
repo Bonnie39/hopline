@@ -1,11 +1,20 @@
 #include "app/TimelineWidget.h"
 
 #include <QContextMenuEvent>
+#include <QDragEnterEvent>
+#include <QDragLeaveEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
 #include <QFileInfo>
 #include <QMenu>
+#include <QMimeData>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QUrl>
 #include <QWheelEvent>
+
+#include "app/MediaBrowser.h"
 
 #include <algorithm>
 #include <cmath>
@@ -71,6 +80,7 @@ TimelineWidget::TimelineWidget(QWidget* parent)
     setMinimumHeight(kRulerHeight + kTrackHeight * 2 + 16);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);  // so the cursor can react to the trim zone without a button down
+    setAcceptDrops(true);
 }
 
 void TimelineWidget::setProject(const Project* project)
@@ -253,11 +263,10 @@ Tick TimelineWidget::clampTrimDelta(Tick delta, bool trimHead) const
 
 void TimelineWidget::updateHoverCursor(const QPoint& pos)
 {
+    // Only the trim edges get a custom cursor; the body keeps the default arrow.
     const Hit hit = hitTest(pos);
     if (hit.onClip && (hit.edge == 0 || hit.edge == 1)) {
         setCursor(Qt::SizeHorCursor);
-    } else if (hit.onClip) {
-        setCursor(Qt::OpenHandCursor);
     } else {
         unsetCursor();
     }
@@ -300,7 +309,9 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event)
             m_dragOrigDuration = clip->duration;
         }
         m_drag = hit.edge == 0 ? Drag::TrimHead : hit.edge == 1 ? Drag::TrimTail : Drag::Move;
-        setCursor(m_drag == Drag::Move ? Qt::ClosedHandCursor : Qt::SizeHorCursor);
+        if (m_drag != Drag::Move) {
+            setCursor(Qt::SizeHorCursor);  // trim only; moving keeps the default cursor
+        }
         m_previewDelta = 0;
         m_pressX = pos.x();
         m_dragMoved = false;
@@ -408,6 +419,82 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event)
     } else if (chosen == remove) {
         emit deleteRequested(hit.trackIndex, hit.clip);
     }
+}
+
+int TimelineWidget::firstTrackOfKind(bool video) const
+{
+    if (!m_project) {
+        return -1;
+    }
+    const auto want = video ? Track::Kind::Video : Track::Kind::Audio;
+    for (std::size_t i = 0; i < m_project->sequence().trackCount(); ++i) {
+        if (m_project->sequence().track(i).kind() == want) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void TimelineWidget::updateDropGhost(const QPoint& pos, const QMimeData* mime)
+{
+    m_dropActive = false;
+    if (m_project && mime->hasFormat(kMediaMimeType)) {
+        const MediaId id = mime->data(kMediaMimeType).toULongLong();
+        if (const MediaSource* media = m_project->media(id)) {
+            m_dropStart = std::max<Tick>(0, m_project->sequence().snapToFrame(tickForX(pos.x())));
+            m_dropDuration = media->duration;
+            m_dropVideo = media->hasVideo;
+            m_dropAudio = media->hasAudio;
+            m_dropActive = true;
+        }
+    }
+    update();
+}
+
+void TimelineWidget::dragEnterEvent(QDragEnterEvent* event)
+{
+    if (event->mimeData()->hasFormat(kMediaMimeType) || event->mimeData()->hasUrls()) {
+        updateDropGhost(event->position().toPoint(), event->mimeData());
+        event->acceptProposedAction();
+    }
+}
+
+void TimelineWidget::dragMoveEvent(QDragMoveEvent* event)
+{
+    updateDropGhost(event->position().toPoint(), event->mimeData());
+    event->acceptProposedAction();
+}
+
+void TimelineWidget::dragLeaveEvent(QDragLeaveEvent*)
+{
+    m_dropActive = false;
+    update();
+}
+
+void TimelineWidget::dropEvent(QDropEvent* event)
+{
+    m_dropActive = false;
+
+    const int x = event->position().toPoint().x();
+    Tick start = tickForX(x);
+    if (m_project) {
+        start = m_project->sequence().snapToFrame(start);
+    }
+    start = std::max<Tick>(0, start);
+
+    if (event->mimeData()->hasFormat(kMediaMimeType)) {
+        const MediaId id = event->mimeData()->data(kMediaMimeType).toULongLong();
+        emit mediaDropped(id, start);
+        event->acceptProposedAction();
+    } else if (event->mimeData()->hasUrls()) {
+        for (const QUrl& url : event->mimeData()->urls()) {
+            if (url.isLocalFile()) {
+                emit fileDropped(url.toLocalFile(), start);
+            }
+        }
+        event->acceptProposedAction();
+    }
+    update();
 }
 
 void TimelineWidget::wheelEvent(QWheelEvent* event)
@@ -634,6 +721,36 @@ void TimelineWidget::drawWaveform(QPainter& painter, const Clip& clip, const QRe
     painter.restore();
 }
 
+void TimelineWidget::drawDropGhost(QPainter& painter)
+{
+    if (!m_dropActive) {
+        return;
+    }
+    const int x0 = std::max(xForTick(m_dropStart), kHeaderWidth);
+    const int x1 = xForTick(m_dropStart + m_dropDuration);
+    if (x1 <= kHeaderWidth) {
+        return;
+    }
+
+    QPen pen(kSelected, 1, Qt::DashLine);
+    painter.setPen(pen);
+    painter.setBrush(QColor(kSelected.red(), kSelected.green(), kSelected.blue(), 40));
+
+    auto drawLane = [&](int trackIndex) {
+        if (trackIndex < 0) {
+            return;
+        }
+        const int y = trackTop(static_cast<std::size_t>(trackIndex));
+        painter.drawRoundedRect(QRect(x0, y + 3, x1 - x0, kTrackHeight - 6), 3, 3);
+    };
+    if (m_dropVideo) {
+        drawLane(firstTrackOfKind(true));
+    }
+    if (m_dropAudio) {
+        drawLane(firstTrackOfKind(false));
+    }
+}
+
 void TimelineWidget::drawPlayhead(QPainter& painter)
 {
     const int x = xForTick(m_playhead);
@@ -654,6 +771,7 @@ void TimelineWidget::paintEvent(QPaintEvent*)
     QPainter painter(this);
     painter.fillRect(rect(), kBackground);
     drawTracks(painter);
+    drawDropGhost(painter);
     drawRuler(painter);
     drawPlayhead(painter);
 }

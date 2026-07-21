@@ -14,7 +14,8 @@ namespace {
 constexpr int kWaveformSampleRate = 8000;   // mono; plenty for an envelope
 constexpr int kBucketsPerSecond = 100;      // 10 ms peaks
 constexpr int kThumbHeight = 48;
-constexpr int kMaxThumbs = 120;
+constexpr int kMaxThumbs = 40;
+constexpr double kThumbInterval = 3.0;  // aim for a thumbnail roughly every few seconds
 
 PreviewCache::Waveform generateWaveform(const QString& path)
 {
@@ -60,7 +61,7 @@ PreviewCache::Thumbnails generateThumbnails(const QString& path, int width, int 
     }
 
     const double duration = decoder.duration();
-    const int count = std::clamp(static_cast<int>(std::llround(duration)), 1, kMaxThumbs);
+    const int count = std::clamp(static_cast<int>(std::llround(duration / kThumbInterval)), 1, kMaxThumbs);
     thumbs.interval = duration / count;
 
     const int thumbWidth = height > 0 ? kThumbHeight * width / height : kThumbHeight;
