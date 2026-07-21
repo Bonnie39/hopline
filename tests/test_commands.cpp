@@ -279,6 +279,85 @@ TEST_CASE("clips referencing unknown media are rejected", "[commands]")
     CHECK(project.sequence().track(0).empty());
 }
 
+TEST_CASE("compound command applies and undoes as one unit", "[commands]")
+{
+    Project project;
+    CommandStack stack;
+    const MediaId source = addSource(project);
+
+    // Two linked clips, V1 and A1, sharing a group.
+    const LinkGroup group = project.nextLinkGroup();
+    Clip v = makeClip(source, 0, 1000);
+    v.linkGroup = group;
+    Clip a = makeClip(source, 0, 1000);
+    a.linkGroup = group;
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, v)));
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(1, a)));
+
+    const ClipId vId = project.sequence().track(0).clips()[0].id;
+    const ClipId aId = project.sequence().track(1).clips()[0].id;
+    const Snapshot before = snapshot(project);
+
+    SECTION("linked move shifts both, undo restores both")
+    {
+        auto compound = std::make_unique<CompoundCommand>("Move Clips");
+        compound->add(std::make_unique<MoveClipCommand>(0, vId, 0, 3000));
+        compound->add(std::make_unique<MoveClipCommand>(1, aId, 1, 3000));
+        REQUIRE(stack.execute(project, std::move(compound)));
+
+        CHECK(project.sequence().track(0).clips()[0].timelineStart == 3000);
+        CHECK(project.sequence().track(1).clips()[0].timelineStart == 3000);
+
+        stack.undo(project);
+        CHECK(snapshot(project) == before);
+    }
+
+    SECTION("if one child fails the whole compound rolls back")
+    {
+        // Block the audio move with a second clip it would overlap.
+        Clip blocker = makeClip(source, 3000, 1000);
+        REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(1, blocker)));
+        const Snapshot withBlocker = snapshot(project);
+
+        auto compound = std::make_unique<CompoundCommand>("Move Clips");
+        compound->add(std::make_unique<MoveClipCommand>(0, vId, 0, 3000));  // would succeed
+        compound->add(std::make_unique<MoveClipCommand>(1, aId, 1, 3000));  // overlaps blocker
+        CHECK_FALSE(stack.execute(project, std::move(compound)));
+
+        // The video move must have been rolled back, not left applied.
+        CHECK(snapshot(project) == withBlocker);
+
+        // The failed compound is not on the stack: undo reaches the blocker add.
+        stack.undo(project);
+        CHECK(project.sequence().track(1).clips().size() == 1);
+    }
+}
+
+TEST_CASE("unlink clears the group and undo restores it", "[commands]")
+{
+    Project project;
+    CommandStack stack;
+    const MediaId source = addSource(project);
+
+    const LinkGroup group = project.nextLinkGroup();
+    Clip v = makeClip(source, 0, 1000);
+    v.linkGroup = group;
+    Clip a = makeClip(source, 0, 1000);
+    a.linkGroup = group;
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, v)));
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(1, a)));
+
+    REQUIRE(project.sequence().clipsInGroup(group).size() == 2);
+
+    REQUIRE(stack.execute(project, std::make_unique<UnlinkGroupCommand>(group)));
+    CHECK(project.sequence().clipsInGroup(group).empty());
+    CHECK_FALSE(project.sequence().track(0).clips()[0].linked());
+
+    stack.undo(project);
+    CHECK(project.sequence().clipsInGroup(group).size() == 2);
+    CHECK(project.sequence().track(0).clips()[0].linkGroup == group);
+}
+
 TEST_CASE("a new edit clears the redo branch", "[commands]")
 {
     Project project;

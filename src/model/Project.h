@@ -23,11 +23,15 @@ public:
     ClipId peekClipId() const { return m_lastClipId; }
     void reserveClipId(ClipId id);
 
+    LinkGroup nextLinkGroup() { return ++m_lastLinkGroup; }
+    void reserveLinkGroup(LinkGroup group);
+
 private:
     std::vector<MediaSource> m_media;
     Sequence m_sequence;
     MediaId m_lastMediaId = kInvalidMedia;
     ClipId m_lastClipId = kInvalidClip;
+    LinkGroup m_lastLinkGroup = kNoLink;
 };
 
 }  // namespace hopline

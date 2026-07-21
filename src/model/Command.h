@@ -22,6 +22,29 @@ public:
 
 using CommandPtr = std::unique_ptr<Command>;
 
+// Applies several commands as one undoable unit — a linked move is one move per
+// group member. apply() is atomic: if any child fails, the ones that already
+// applied are rolled back and the whole thing reports failure.
+class CompoundCommand : public Command {
+public:
+    explicit CompoundCommand(std::string name)
+        : m_name(std::move(name))
+    {
+    }
+
+    void add(CommandPtr command) { m_commands.push_back(std::move(command)); }
+    bool empty() const { return m_commands.empty(); }
+    size_t size() const { return m_commands.size(); }
+
+    bool apply(Project& project) override;
+    void undo(Project& project) override;
+    std::string name() const override { return m_name; }
+
+private:
+    std::vector<CommandPtr> m_commands;
+    std::string m_name;
+};
+
 class CommandStack {
 public:
     // Takes ownership. Returns false and discards the command if apply() failed,

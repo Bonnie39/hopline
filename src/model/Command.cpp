@@ -4,6 +4,27 @@
 
 namespace hopline {
 
+bool CompoundCommand::apply(Project& project)
+{
+    for (size_t i = 0; i < m_commands.size(); ++i) {
+        if (!m_commands[i]->apply(project)) {
+            // Roll back the children that already succeeded, newest first.
+            for (size_t j = i; j-- > 0;) {
+                m_commands[j]->undo(project);
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+void CompoundCommand::undo(Project& project)
+{
+    for (size_t i = m_commands.size(); i-- > 0;) {
+        m_commands[i]->undo(project);
+    }
+}
+
 bool CommandStack::execute(Project& project, CommandPtr command)
 {
     if (!command || !command->apply(project)) {

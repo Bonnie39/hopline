@@ -11,6 +11,7 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include "app/PreviewCache.h"
 #include "app/PreviewWidget.h"
 #include "app/TimelineWidget.h"
 #include "media/MediaProbe.h"
@@ -131,9 +132,20 @@ MainWindow::MainWindow(QWidget* parent)
     layout->addWidget(m_seekBar);
     setCentralWidget(central);
 
+    m_previews = std::make_unique<PreviewCache>();
+    connect(m_previews.get(), &PreviewCache::ready, this, [this](MediaId) { m_timeline->update(); });
+
     m_timeline = new TimelineWidget(this);
     m_timeline->setProject(&m_project);
+    m_timeline->setPreviewCache(m_previews.get());
     connect(m_timeline, &TimelineWidget::playheadDragged, this, &MainWindow::timelineScrubbed);
+    connect(m_timeline, &TimelineWidget::clipMoved, this, &MainWindow::onClipMoved);
+    connect(m_timeline, &TimelineWidget::clipTrimmed, this, &MainWindow::onClipTrimmed);
+    connect(m_timeline, &TimelineWidget::unlinkRequested, this, &MainWindow::onUnlink);
+    connect(m_timeline, &TimelineWidget::deleteRequested, this, &MainWindow::onDeleteClip);
+    connect(m_timeline, &TimelineWidget::selectionChanged, this, [this](ClipId clip) {
+        statusBar()->showMessage(clip ? QString("Selected clip %1").arg(clip) : QString("Ready"));
+    });
     auto* timelineDock = new QDockWidget("Timeline", this);
     timelineDock->setWidget(m_timeline);
     addDockWidget(Qt::BottomDockWidgetArea, timelineDock);
@@ -148,6 +160,12 @@ MainWindow::MainWindow(QWidget* parent)
     fileMenu->addAction("&Open...", QKeySequence::Open, this, &MainWindow::openFile);
     fileMenu->addSeparator();
     fileMenu->addAction("E&xit", QKeySequence::Quit, this, &QWidget::close);
+
+    auto* editMenu = menuBar()->addMenu("&Edit");
+    editMenu->addAction("&Undo", QKeySequence::Undo, this, &MainWindow::undo);
+    editMenu->addAction("&Redo", QKeySequence::Redo, this, &MainWindow::redo);
+    editMenu->addSeparator();
+    editMenu->addAction("&Delete Clip", QKeySequence::Delete, this, &MainWindow::deleteSelection);
 
     auto* playbackMenu = menuBar()->addMenu("&Playback");
     playbackMenu->addAction("&Play/Pause", Qt::Key_Space, this, &MainWindow::togglePlay);
@@ -191,17 +209,14 @@ void MainWindow::load(const QString& path)
 
     m_log->appendPlainText(describe(*info));
 
-    m_player = std::make_unique<Player>();
-    if (!m_player->open(path.toStdString(), error)) {
-        m_log->appendPlainText(QString("decoder: %1").arg(QString::fromStdString(error)));
-        m_player.reset();
-        m_preview->clear();
-        statusBar()->showMessage("No video stream");
-        return;
-    }
+    // Fresh project per open for now; the media browser will replace this.
+    m_player.reset();
+    m_project = Project{};
+    m_commands.clear();
+    m_previews->clear();
 
-    // Import into the project: one media source, and a clip on each track
-    // spanning the whole file. Goes through commands so it lands on the undo stack.
+    // Import: one media source, and a full-length clip on each track. Through
+    // commands so the import itself lands on the undo stack.
     const MediaSource source = toMediaSource(*info);
     const MediaId mediaId = m_project.addMedia(source);
 
@@ -218,6 +233,10 @@ void MainWindow::load(const QString& path)
     clip.sourceIn = 0;
     clip.duration = source.duration;
 
+    // Video and audio halves share a link group so they move/trim together.
+    if (source.hasVideo && source.hasAudio) {
+        clip.linkGroup = m_project.nextLinkGroup();
+    }
     if (source.hasVideo) {
         m_commands.execute(m_project, std::make_unique<AddClipCommand>(0, clip));
     }
@@ -225,6 +244,13 @@ void MainWindow::load(const QString& path)
         m_commands.execute(m_project, std::make_unique<AddClipCommand>(1, clip));
     }
 
+    // Player resolves the sequence, so the project has to exist first.
+    m_player = std::make_unique<Player>();
+    m_player->open(m_project, error);
+
+    m_previews->request(mediaId, path, source.hasVideo, source.hasAudio, source.width, source.height);
+
+    m_timeline->setProject(&m_project);
     m_timeline->setPlayhead(0);
     m_timeline->zoomToFit();
 
@@ -237,6 +263,114 @@ void MainWindow::timelineScrubbed(Tick time)
 {
     if (m_player) {
         m_player->seek(secondsFromTicks(time));
+    }
+}
+
+namespace {
+
+// The clips an edit touches: the whole link group, or just the one clip.
+std::vector<std::pair<std::size_t, ClipId>> editTargets(const Project& project, std::size_t track, ClipId clip)
+{
+    const Clip* c = project.sequence().findClip(clip);
+    if (c && c->linked()) {
+        return project.sequence().clipsInGroup(c->linkGroup);
+    }
+    return { { track, clip } };
+}
+
+}  // namespace
+
+void MainWindow::commitEdit()
+{
+    if (m_player) {
+        m_player->reload(m_project);  // decode threads run on a snapshot; refresh it
+    }
+    m_timeline->update();
+}
+
+void MainWindow::onClipMoved(std::size_t trackIndex, ClipId clip, Tick newStart)
+{
+    const Clip* c = m_project.sequence().findClip(clip);
+    if (!c) {
+        return;
+    }
+    const Tick delta = newStart - c->timelineStart;
+
+    auto compound = std::make_unique<CompoundCommand>("Move Clip");
+    for (const auto& [track, id] : editTargets(m_project, trackIndex, clip)) {
+        const Clip* member = m_project.sequence().findClip(id);
+        compound->add(std::make_unique<MoveClipCommand>(track, id, track, member->timelineStart + delta));
+    }
+
+    if (m_commands.execute(m_project, std::move(compound))) {
+        commitEdit();
+    } else {
+        m_timeline->update();  // rejected (overlap): snap back to the model
+    }
+}
+
+void MainWindow::onClipTrimmed(std::size_t trackIndex, ClipId clip, bool trimHead, Tick delta)
+{
+    const auto edge = trimHead ? TrimClipCommand::Edge::Head : TrimClipCommand::Edge::Tail;
+
+    auto compound = std::make_unique<CompoundCommand>("Trim Clip");
+    for (const auto& [track, id] : editTargets(m_project, trackIndex, clip)) {
+        compound->add(std::make_unique<TrimClipCommand>(track, id, edge, delta));
+    }
+
+    if (m_commands.execute(m_project, std::move(compound))) {
+        commitEdit();
+    } else {
+        m_timeline->update();
+    }
+}
+
+void MainWindow::onUnlink(ClipId clip)
+{
+    const Clip* c = m_project.sequence().findClip(clip);
+    if (c && c->linked()
+        && m_commands.execute(m_project, std::make_unique<UnlinkGroupCommand>(c->linkGroup))) {
+        commitEdit();
+    }
+}
+
+void MainWindow::onDeleteClip(std::size_t trackIndex, ClipId clip)
+{
+    auto compound = std::make_unique<CompoundCommand>("Delete Clip");
+    for (const auto& [track, id] : editTargets(m_project, trackIndex, clip)) {
+        compound->add(std::make_unique<RemoveClipCommand>(track, id));
+    }
+
+    if (m_commands.execute(m_project, std::move(compound))) {
+        m_timeline->clearSelection();
+        commitEdit();
+    }
+}
+
+void MainWindow::deleteSelection()
+{
+    const ClipId clip = m_timeline->selected();
+    std::size_t track = 0;
+    if (clip != kInvalidClip && m_project.sequence().findClip(clip, &track)) {
+        onDeleteClip(track, clip);
+    }
+}
+
+void MainWindow::undo()
+{
+    if (m_commands.canUndo()) {
+        m_commands.undo(m_project);
+        m_timeline->clearSelection();
+        commitEdit();
+    }
+}
+
+void MainWindow::redo()
+{
+    if (m_commands.canRedo()) {
+        m_commands.redo(m_project);
+        m_timeline->clearSelection();
+        commitEdit();
     }
 }
 

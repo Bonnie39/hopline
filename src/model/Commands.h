@@ -1,5 +1,8 @@
 #pragma once
 
+#include <utility>
+#include <vector>
+
 #include "model/Clip.h"
 #include "model/Command.h"
 
@@ -92,6 +95,24 @@ private:
     Edge m_edge;
     Tick m_delta;
     Clip m_original;
+};
+
+// Clears the link group on every clip that shares it, so they can be moved
+// independently. Undo restores the group on exactly those clips.
+class UnlinkGroupCommand : public Command {
+public:
+    explicit UnlinkGroupCommand(LinkGroup group)
+        : m_group(group)
+    {
+    }
+
+    bool apply(Project& project) override;
+    void undo(Project& project) override;
+    std::string name() const override { return "Unlink Clips"; }
+
+private:
+    LinkGroup m_group;
+    std::vector<std::pair<size_t, ClipId>> m_members;  // captured on first apply
 };
 
 // Splits at a timeline instant; the right-hand piece gets a fresh id.

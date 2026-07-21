@@ -2,6 +2,8 @@ qt_add_executable(hopline
     main.cpp
     app/MainWindow.cpp
     app/MainWindow.h
+    app/PreviewCache.cpp
+    app/PreviewCache.h
     app/PreviewWidget.cpp
     app/PreviewWidget.h
     app/TimelineWidget.cpp

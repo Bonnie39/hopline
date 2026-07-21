@@ -23,4 +23,9 @@ void Project::reserveClipId(ClipId id)
     m_lastClipId = std::max(m_lastClipId, id);
 }
 
+void Project::reserveLinkGroup(LinkGroup group)
+{
+    m_lastLinkGroup = std::max(m_lastLinkGroup, group);
+}
+
 }  // namespace hopline

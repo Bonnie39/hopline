@@ -81,6 +81,35 @@ TEST_CASE("sequence duration spans the longest track", "[sequence]")
     CHECK(sequence.duration() == 5000);
 }
 
+TEST_CASE("cut points are the sorted unique clip boundaries", "[sequence]")
+{
+    Sequence sequence;
+    REQUIRE(sequence.track(0).insert(makeClip(1, 10, 0, 1000)));
+    REQUIRE(sequence.track(0).insert(makeClip(2, 10, 1000, 500)));  // butt-joined, shares 1000
+
+    const auto cuts = sequence.cutPoints(Track::Kind::Video);
+    // starts 0, 1000 and ends 1000, 1500 -> {0, 1000, 1500}
+    REQUIRE(cuts.size() == 3);
+    CHECK(cuts[0] == 0);
+    CHECK(cuts[1] == 1000);
+    CHECK(cuts[2] == 1500);
+
+    CHECK(sequence.cutPoints(Track::Kind::Audio).empty());
+    CHECK(sequence.hasClips(Track::Kind::Video));
+    CHECK_FALSE(sequence.hasClips(Track::Kind::Audio));
+}
+
+TEST_CASE("top video clip and gaps resolve to pointers", "[sequence]")
+{
+    Sequence sequence;
+    REQUIRE(sequence.track(0).insert(makeClip(1, 10, 0, 1000)));
+    REQUIRE(sequence.track(0).insert(makeClip(2, 10, 2000, 1000)));
+
+    CHECK(sequence.topVideoClipAt(500)->id == 1);
+    CHECK(sequence.topVideoClipAt(1500) == nullptr);  // gap
+    CHECK(sequence.topVideoClipAt(2500)->id == 2);
+}
+
 TEST_CASE("frame snapping floors to the frame boundary", "[sequence]")
 {
     Sequence sequence;

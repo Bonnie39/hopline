@@ -48,6 +48,17 @@ const Clip* Track::find(ClipId id) const
     return it != m_clips.end() ? &*it : nullptr;
 }
 
+bool Track::setLinkGroup(ClipId id, LinkGroup group)
+{
+    const auto it = std::find_if(m_clips.begin(), m_clips.end(),
+                                 [id](const Clip& c) { return c.id == id; });
+    if (it == m_clips.end()) {
+        return false;
+    }
+    it->linkGroup = group;
+    return true;
+}
+
 const Clip* Track::clipAt(Tick time) const
 {
     for (const Clip& clip : m_clips) {

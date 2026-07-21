@@ -124,6 +124,27 @@ void TrimClipCommand::undo(Project& project)
     project.sequence().track(m_track).insert(m_original);
 }
 
+bool UnlinkGroupCommand::apply(Project& project)
+{
+    if (m_members.empty()) {
+        m_members = project.sequence().clipsInGroup(m_group);
+    }
+    if (m_members.empty()) {
+        return false;
+    }
+    for (const auto& [track, id] : m_members) {
+        project.sequence().track(track).setLinkGroup(id, kNoLink);
+    }
+    return true;
+}
+
+void UnlinkGroupCommand::undo(Project& project)
+{
+    for (const auto& [track, id] : m_members) {
+        project.sequence().track(track).setLinkGroup(id, m_group);
+    }
+}
+
 bool SplitClipCommand::apply(Project& project)
 {
     Sequence& sequence = project.sequence();

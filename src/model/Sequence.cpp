@@ -69,6 +69,88 @@ std::vector<Resolved> Sequence::resolveAudioAt(Tick time) const
     return active;
 }
 
+const Clip* Sequence::topVideoClipAt(Tick time) const
+{
+    for (auto it = m_tracks.rbegin(); it != m_tracks.rend(); ++it) {
+        if (it->kind() != Track::Kind::Video) {
+            continue;
+        }
+        if (const Clip* clip = it->clipAt(time)) {
+            return clip;
+        }
+    }
+    return nullptr;
+}
+
+const Clip* Sequence::firstAudioClipAt(Tick time) const
+{
+    for (const Track& track : m_tracks) {
+        if (track.kind() != Track::Kind::Audio) {
+            continue;
+        }
+        if (const Clip* clip = track.clipAt(time)) {
+            return clip;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<Tick> Sequence::cutPoints(Track::Kind kind) const
+{
+    std::vector<Tick> points;
+    for (const Track& track : m_tracks) {
+        if (track.kind() != kind) {
+            continue;
+        }
+        for (const Clip& clip : track.clips()) {
+            points.push_back(clip.timelineStart);
+            points.push_back(clip.range().end());
+        }
+    }
+    std::sort(points.begin(), points.end());
+    points.erase(std::unique(points.begin(), points.end()), points.end());
+    return points;
+}
+
+const Clip* Sequence::findClip(ClipId id, size_t* trackIndex) const
+{
+    for (size_t i = 0; i < m_tracks.size(); ++i) {
+        if (const Clip* clip = m_tracks[i].find(id)) {
+            if (trackIndex) {
+                *trackIndex = i;
+            }
+            return clip;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<std::pair<size_t, ClipId>> Sequence::clipsInGroup(LinkGroup group) const
+{
+    std::vector<std::pair<size_t, ClipId>> members;
+    if (group == kNoLink) {
+        return members;
+    }
+    for (size_t i = 0; i < m_tracks.size(); ++i) {
+        for (const Clip& clip : m_tracks[i].clips()) {
+            if (clip.linkGroup == group) {
+                members.emplace_back(i, clip.id);
+            }
+        }
+    }
+    return members;
+}
+
+bool Sequence::hasClips(Track::Kind kind) const
+{
+    for (const Track& track : m_tracks) {
+        if (track.kind() == kind && !track.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 Tick Sequence::snapToFrame(Tick time) const
 {
     const Tick frame = frameDuration();

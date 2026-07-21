@@ -33,6 +33,9 @@ public:
     const Clip* find(ClipId id) const;
     const Clip* clipAt(Tick time) const;
 
+    // Link group doesn't affect ordering or overlap, so it's safe to change in place.
+    bool setLinkGroup(ClipId id, LinkGroup group);
+
     // Whether `range` would fit, ignoring the clip being moved or trimmed.
     bool isFree(const TimeRange& range, ClipId ignore = kInvalidClip) const;
 
