@@ -12,6 +12,7 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPixmap>
 #include <QResizeEvent>
 #include <QUrl>
@@ -31,10 +32,17 @@ namespace {
 
 constexpr int kHeaderWidth = 72;
 constexpr int kRulerHeight = 24;
-constexpr int kTrackHeight = 56;
+constexpr int kDefaultTrackHeight = 56;
+constexpr int kMinTrackHeight = 16;   // ~just the clip name strip
+constexpr int kMaxTrackHeight = 260;
 constexpr int kTrackGap = 2;
 constexpr int kTrimHandlePx = 6;
 constexpr int kDragThresholdPx = 3;
+constexpr int kVBarWidth = 14;      // vertical zoom-bar gutter on the right
+constexpr int kVBarMinHandle = 20;  // min handle length in px
+constexpr int kClipLabelStrip = 15;  // colored name strip at the top of a clip
+constexpr int kDividerGrab = 4;      // px around a header divider that grabs it
+constexpr int kMinSection = 40;      // keep both A/V sections at least this tall
 
 // Neutral shades matching the app palette; the track area is a darker "well" than
 // the surrounding panels, and the lanes carry no blue/green tint.
@@ -44,6 +52,8 @@ const QColor kHeaderBackground(24, 25, 27);  // track-name column (panel shade)
 const QColor kLaneVideo(22, 23, 25);        // track row, neutral
 const QColor kLaneAudio(22, 23, 25);        // same — no green tint
 const QColor kGridLine(44, 45, 49);
+const QColor kHeaderDivider(50, 52, 57);  // grabbable track edge in the header (thin, subtle)
+const QColor kAVDivider(62, 64, 70);      // grabbable A/V split, across the whole timeline
 const QColor kText(165, 166, 170);
 const QColor kClipVideo(58, 106, 150);
 const QColor kClipAudio(58, 140, 104);
@@ -82,7 +92,7 @@ QString timeLabel(double seconds)
 TimelineWidget::TimelineWidget(QWidget* parent)
     : QWidget(parent)
 {
-    setMinimumHeight(kRulerHeight + kTrackHeight * 2 + 16);
+    setMinimumHeight(kRulerHeight + kDefaultTrackHeight * 2 + 16);
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);  // so the cursor can react to the trim zone without a button down
     setAcceptDrops(true);
@@ -102,7 +112,7 @@ double TimelineWidget::viewStart() const
 
 double TimelineWidget::viewSpan() const
 {
-    const int usable = width() - kHeaderWidth;
+    const int usable = contentRight() - kHeaderWidth;
     return usable > 0 ? usable / m_pixelsPerSecond : 0.0;
 }
 
@@ -117,7 +127,7 @@ double TimelineWidget::viewTotal() const
 
 void TimelineWidget::setView(double start, double span)
 {
-    const int usable = width() - kHeaderWidth;
+    const int usable = contentRight() - kHeaderWidth;
     if (usable <= 0 || span <= 1e-6) {
         return;
     }
@@ -153,7 +163,7 @@ void TimelineWidget::zoomToFit()
         return;
     }
     const double seconds = secondsFromTicks(m_project->sequence().duration());
-    const int usable = width() - kHeaderWidth - 16;
+    const int usable = contentRight() - kHeaderWidth - 16;
     if (seconds > 0.0 && usable > 0) {
         m_pixelsPerSecond = usable / seconds;
         m_scrollSeconds = 0.0;
@@ -174,11 +184,100 @@ Tick TimelineWidget::tickForX(int x) const
     return ticksFromSeconds(std::max(0.0, seconds));
 }
 
+int TimelineWidget::contentRight() const
+{
+    return width() - kVBarWidth;
+}
+
+void TimelineWidget::syncTrackHeights()
+{
+    const std::size_t n = m_project ? m_project->sequence().trackCount() : 0;
+    if (m_trackH.size() != n) {
+        m_trackH.resize(n, kDefaultTrackHeight);  // new tracks default; extras dropped
+    }
+}
+
+int TimelineWidget::trackHeightAt(std::size_t index) const
+{
+    return index < m_trackH.size() ? m_trackH[index] : kDefaultTrackHeight;
+}
+
+int TimelineWidget::trackAtLevel(bool video, int level) const
+{
+    if (!m_project) {
+        return -1;
+    }
+    const Sequence& seq = m_project->sequence();
+    int l = 0;
+    for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+        if ((seq.track(i).kind() == Track::Kind::Video) == video) {
+            if (l == level) {
+                return static_cast<int>(i);
+            }
+            ++l;
+        }
+    }
+    return -1;
+}
+
+int TimelineWidget::heightOfLevel(bool video, int level) const
+{
+    const int idx = trackAtLevel(video, level);
+    return idx >= 0 ? trackHeightAt(static_cast<std::size_t>(idx)) : kDefaultTrackHeight;
+}
+
+int TimelineWidget::sectionTrackCount(bool video) const
+{
+    if (!m_project) {
+        return 0;
+    }
+    const Sequence& seq = m_project->sequence();
+    int n = 0;
+    for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+        if ((seq.track(i).kind() == Track::Kind::Video) == video) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+int TimelineWidget::sectionContentHeight(bool video) const
+{
+    int total = 0, n = 0;
+    if (m_project) {
+        const Sequence& seq = m_project->sequence();
+        for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+            if ((seq.track(i).kind() == Track::Kind::Video) == video) {
+                total += trackHeightAt(i);
+                ++n;
+            }
+        }
+    }
+    return n > 0 ? total + (n - 1) * kTrackGap : 0;
+}
+
+int TimelineWidget::sectionViewport(bool video) const
+{
+    const TrackLayout lay = trackLayout();
+    return std::max(0, video ? lay.dividerY - kRulerHeight : height() - lay.dividerY);
+}
+
+double TimelineWidget::maxScroll(bool video) const
+{
+    return std::max(0.0, static_cast<double>(sectionContentHeight(video) - sectionViewport(video)));
+}
+
+void TimelineWidget::clampScrolls()
+{
+    m_videoScroll = std::clamp(m_videoScroll, 0.0, maxScroll(true));
+    m_audioScroll = std::clamp(m_audioScroll, 0.0, maxScroll(false));
+}
+
 // The longer the timeline, the further out we can zoom — always at least far
 // enough to fit the whole sequence in the visible width.
 double TimelineWidget::minPixelsPerSecond() const
 {
-    const int usable = width() - kHeaderWidth;
+    const int usable = contentRight() - kHeaderWidth;
     const double dur = m_project ? secondsFromTicks(m_project->sequence().duration()) : 0.0;
     if (usable <= 0 || dur <= 0.0) {
         return 1.0;
@@ -188,46 +287,25 @@ double TimelineWidget::minPixelsPerSecond() const
 
 int TimelineWidget::trackTop(std::size_t index) const
 {
-    // Center the track block vertically in the area below the ruler, so it grows
-    // from the middle as more tracks are added.
     if (!m_project) {
         return kRulerHeight;
     }
-    const Sequence& seq = m_project->sequence();
-    const TrackLayout lay = trackLayout();
-    const int stride = kTrackHeight + kTrackGap;
-    const bool video = seq.track(index).kind() == Track::Kind::Video;
-    int level = 0;  // 0 = V1/A1 (nearest the divider)
-    for (std::size_t i = 0; i < index; ++i) {
-        if ((seq.track(i).kind() == Track::Kind::Video) == video) {
-            ++level;
-        }
-    }
-    return video ? lay.videoBottom - kTrackHeight - level * stride  // stack up from the divider
-                 : lay.audioTop + level * stride;                   // stack down from the divider
+    const bool video = m_project->sequence().track(index).kind() == Track::Kind::Video;
+    return levelToY(levelOfTrack(index), video);
 }
 
 TimelineWidget::TrackLayout TimelineWidget::trackLayout() const
 {
+    // The divider sits where the user dragged it (default center); the two sections
+    // grow outward from it and scroll independently when they overflow.
     TrackLayout lay;
-    lay.dividerY = lay.videoBottom = lay.audioTop = kRulerHeight;
-    if (!m_project) {
-        return lay;
-    }
-    const Sequence& seq = m_project->sequence();
-    int nv = 0, na = 0;
-    for (std::size_t i = 0; i < seq.trackCount(); ++i) {
-        (seq.track(i).kind() == Track::Kind::Video ? nv : na)++;
-    }
-    const int videoH = nv > 0 ? nv * kTrackHeight + (nv - 1) * kTrackGap : 0;
-    const int audioH = na > 0 ? na * kTrackHeight + (na - 1) * kTrackGap : 0;
-    const int gap = (nv > 0 && na > 0) ? kTrackGap : 0;
-    const int total = videoH + gap + audioH;
-    const int avail = height() - kRulerHeight;
-    const int blockTop = kRulerHeight + std::max(kTrackGap, (avail - total) / 2);
-    lay.videoBottom = blockTop + videoH;
-    lay.audioTop = lay.videoBottom + gap;
-    lay.dividerY = lay.videoBottom + gap / 2;
+    const int avail = std::max(0, height() - kRulerHeight);
+    int div = kRulerHeight + static_cast<int>(std::lround(m_dividerFrac * avail));
+    // Keep both sections visible; fall back to the middle when the widget is tiny.
+    const int lo = kRulerHeight + std::min(kMinSection, avail / 2);
+    const int hi = kRulerHeight + std::max(avail / 2, avail - kMinSection);
+    lay.dividerY = std::clamp(div, lo, hi);
+    lay.videoBottom = lay.audioTop = lay.dividerY;
     return lay;
 }
 
@@ -236,9 +314,14 @@ int TimelineWidget::trackAtY(int y) const
     if (!m_project) {
         return -1;
     }
+    const TrackLayout lay = trackLayout();
     for (std::size_t i = 0; i < m_project->sequence().trackCount(); ++i) {
+        const bool video = m_project->sequence().track(i).kind() == Track::Kind::Video;
+        if (video ? (y >= lay.dividerY) : (y < lay.dividerY)) {
+            continue;  // clipped to the wrong section
+        }
         const int top = trackTop(i);
-        if (y >= top && y < top + kTrackHeight) {
+        if (y >= top && y < top + trackHeightAt(i)) {
             return static_cast<int>(i);
         }
     }
@@ -264,25 +347,48 @@ int TimelineWidget::levelOfTrack(std::size_t index) const
 int TimelineWidget::levelToY(int level, bool video) const
 {
     const TrackLayout lay = trackLayout();
-    const int stride = kTrackHeight + kTrackGap;
-    return video ? lay.videoBottom - kTrackHeight - level * stride  // levels go up
-                 : lay.audioTop + level * stride;                   // levels go down
+    int cum = 0;  // sum of (height + gap) for the levels nearer the divider
+    for (int l = 0; l < level; ++l) {
+        cum += heightOfLevel(video, l) + kTrackGap;
+    }
+    return video ? lay.dividerY - cum - heightOfLevel(video, level) + static_cast<int>(std::lround(m_videoScroll))
+                 : lay.dividerY + cum - static_cast<int>(std::lround(m_audioScroll));
 }
 
 int TimelineWidget::levelForY(int y, bool video) const
 {
+    // Walk levels out from the divider (heights vary per track) and return the one
+    // whose band contains y, extrapolating past the last track with the default height.
     const TrackLayout lay = trackLayout();
-    const int stride = kTrackHeight + kTrackGap;
-    const double level = video ? static_cast<double>(lay.videoBottom - kTrackHeight - y) / stride
-                               : static_cast<double>(y - lay.audioTop) / stride;
-    return std::max(0, static_cast<int>(std::lround(level)));
+    if (video) {
+        double bottom = lay.dividerY + m_videoScroll;  // level 0's bottom edge
+        for (int l = 0; l < 512; ++l) {
+            const int h = heightOfLevel(video, l);
+            const double top = bottom - h;
+            if (y >= top - kTrackGap / 2.0) {
+                return l;
+            }
+            bottom = top - kTrackGap;
+        }
+        return 511;
+    }
+    double top = lay.dividerY - m_audioScroll;  // level 0's top edge
+    for (int l = 0; l < 512; ++l) {
+        const int h = heightOfLevel(video, l);
+        const double bottom = top + h;
+        if (y <= bottom + kTrackGap / 2.0) {
+            return l;
+        }
+        top = bottom + kTrackGap;
+    }
+    return 511;
 }
 
 TimelineWidget::Hit TimelineWidget::hitTest(const QPoint& pos) const
 {
     Hit hit;
-    if (pos.x() < kHeaderWidth) {
-        return hit;
+    if (pos.x() < kHeaderWidth || pos.x() >= contentRight()) {
+        return hit;  // header column or vertical-bar gutter
     }
     if (pos.y() < kRulerHeight) {
         hit.onRuler = true;
@@ -293,9 +399,14 @@ TimelineWidget::Hit TimelineWidget::hitTest(const QPoint& pos) const
     }
 
     const Sequence& sequence = m_project->sequence();
+    const TrackLayout lay = trackLayout();
     for (std::size_t i = 0; i < sequence.trackCount(); ++i) {
+        const bool video = sequence.track(i).kind() == Track::Kind::Video;
+        if (video ? (pos.y() >= lay.dividerY) : (pos.y() < lay.dividerY)) {
+            continue;  // clipped to the wrong section
+        }
         const int top = trackTop(i);
-        if (pos.y() < top || pos.y() >= top + kTrackHeight) {
+        if (pos.y() < top || pos.y() >= top + trackHeightAt(i)) {
             continue;
         }
         for (const Clip& clip : sequence.track(i).clips()) {
@@ -439,6 +550,72 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event)
         return;
     }
     const QPoint pos = event->position().toPoint();
+
+    // Vertical zoom-bar gutter on the right: scroll (body) or zoom track height (ends).
+    if (pos.x() >= contentRight() && pos.y() >= kRulerHeight && m_project && m_project->hasActiveSequence()) {
+        syncTrackHeights();
+        const bool video = pos.y() < trackLayout().dividerY;
+        if (sectionTrackCount(video) <= 0) {
+            return;
+        }
+        const QRect h = vbarHandle(video);
+        m_vdragVideo = video;
+        m_vPressY = pos.y();
+        m_vPressScroll = video ? m_videoScroll : m_audioScroll;
+        m_vPressHeights.clear();
+        {
+            const Sequence& seq = m_project->sequence();
+            for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+                if ((seq.track(i).kind() == Track::Kind::Video) == video) {
+                    m_vPressHeights.push_back(trackHeightAt(i));
+                }
+            }
+        }
+        m_vPressHandleTop = h.top();
+        m_vPressHandleBottom = h.bottom();
+        constexpr int kGripV = 8;
+        if (pos.y() <= h.top() + kGripV) {
+            m_vdrag = VDrag::ZoomTop;
+        } else if (pos.y() >= h.bottom() - kGripV) {
+            m_vdrag = VDrag::ZoomBottom;
+        } else if (pos.y() > h.top() && pos.y() < h.bottom()) {
+            m_vdrag = VDrag::Scroll;
+        } else {
+            // Click on the groove: jump so the handle centers on the click, then scroll.
+            const QRect bar = vbarRect(video);
+            const double contentH = sectionContentHeight(video);
+            const double viewport = sectionViewport(video);
+            if (contentH > viewport && bar.height() > 0) {
+                double windowTop = (double(pos.y() - bar.top()) / bar.height()) * contentH - viewport / 2.0;
+                windowTop = std::clamp(windowTop, 0.0, contentH - viewport);
+                if (video) {
+                    m_videoScroll = (contentH - viewport) - windowTop;
+                } else {
+                    m_audioScroll = windowTop;
+                }
+                clampScrolls();
+            }
+            m_vdrag = VDrag::Scroll;
+            m_vPressScroll = video ? m_videoScroll : m_audioScroll;
+        }
+        setCursor(m_vdrag == VDrag::Scroll ? Qt::ArrowCursor : Qt::PointingHandCursor);
+        update();
+        return;
+    }
+
+    // Grabbable dividers on the header column (A/V split, or a track's edge).
+    const DividerHit dh = dividerHitTest(pos);
+    if (dh.kind != DividerKind::None) {
+        syncTrackHeights();
+        m_divDrag = dh.kind;
+        m_divTrack = dh.trackIndex;
+        m_divPressY = pos.y();
+        m_divPressHeight = trackHeightAt(dh.trackIndex);
+        m_divPressFrac = m_dividerFrac;
+        setCursor(Qt::SizeVerCursor);
+        return;
+    }
+
     const Hit hit = hitTest(pos);
 
     if (hit.onRuler) {
@@ -489,7 +666,32 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event)
         emit viewChanged();
         return;
     }
+    if (m_vdrag != VDrag::None) {
+        updateVDrag(pos.y());
+        return;
+    }
+    if (m_divDrag != DividerKind::None) {
+        updateDividerDrag(pos.y());
+        return;
+    }
     if (m_drag == Drag::None) {
+        // Over a vertical bar: knobs zoom (pointing hand), body scrolls (arrow).
+        if (pos.x() >= contentRight() && pos.y() >= kRulerHeight && m_project
+            && m_project->hasActiveSequence()) {
+            const bool video = pos.y() < trackLayout().dividerY;
+            if (sectionTrackCount(video) > 0) {
+                const QRect h = vbarHandle(video);
+                const bool onKnob = (pos.y() <= h.top() + 8) || (pos.y() >= h.bottom() - 8);
+                setCursor(onKnob ? Qt::PointingHandCursor : Qt::ArrowCursor);
+            } else {
+                unsetCursor();
+            }
+            return;
+        }
+        if (dividerHitTest(pos).kind != DividerKind::None) {
+            setCursor(Qt::SizeVerCursor);  // grabbable header divider
+            return;
+        }
         updateHoverCursor(pos);
         return;
     }
@@ -537,6 +739,18 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event)
         }
         return;
     }
+    if (m_vdrag != VDrag::None) {
+        m_vdrag = VDrag::None;
+        unsetCursor();
+        update();
+        return;
+    }
+    if (m_divDrag != DividerKind::None) {
+        m_divDrag = DividerKind::None;
+        unsetCursor();
+        update();
+        return;
+    }
     if (event->button() != Qt::LeftButton) {
         return;
     }
@@ -569,6 +783,136 @@ void TimelineWidget::commitDrag()
     default:
         break;
     }
+}
+
+void TimelineWidget::updateVDrag(int y)
+{
+    const bool video = m_vdragVideo;
+    const QRect bar = vbarRect(video);
+    const int barH = std::max(1, bar.height());
+    const int n = sectionTrackCount(video);
+    const double viewport = sectionViewport(video);
+    if (n <= 0) {
+        return;
+    }
+
+    if (m_vdrag == VDrag::Scroll) {
+        const double contentH = sectionContentHeight(video);  // track height is fixed while scrolling
+        if (contentH <= viewport) {
+            return;  // everything fits; nothing to scroll
+        }
+        const double dContent = static_cast<double>(y - m_vPressY) / barH * contentH;
+        const double pressWindowTop = video ? (contentH - viewport - m_vPressScroll) : m_vPressScroll;
+        const double windowTop = std::clamp(pressWindowTop + dContent, 0.0, contentH - viewport);
+        if (video) {
+            m_videoScroll = (contentH - viewport) - windowTop;
+        } else {
+            m_audioScroll = windowTop;
+        }
+    } else {
+        // Zoom: resize the handle from one end, keeping the other end anchored, and
+        // translate the new handle length into a per-section track height.
+        double lenPx = 0.0;
+        double anchorFrac = 0.0;  // bar fraction of the anchored (opposite) end
+        if (m_vdrag == VDrag::ZoomBottom) {
+            const int newBottom = std::clamp(y, m_vPressHandleTop + kVBarMinHandle, bar.bottom());
+            lenPx = newBottom - m_vPressHandleTop;
+            anchorFrac = static_cast<double>(m_vPressHandleTop - bar.top()) / barH;
+        } else {  // ZoomTop
+            const int newTop = std::clamp(y, bar.top(), m_vPressHandleBottom - kVBarMinHandle);
+            lenPx = m_vPressHandleBottom - newTop;
+            anchorFrac = static_cast<double>(m_vPressHandleBottom - bar.top()) / barH;
+        }
+        const double frac = std::clamp(lenPx / barH, 1e-3, 1.0);
+        const double desiredContentH = viewport / frac;
+        // Scale every track in the section proportionally from its press height.
+        int pressContentH = 0;
+        for (int h : m_vPressHeights) {
+            pressContentH += h;
+        }
+        if (!m_vPressHeights.empty()) {
+            pressContentH += (static_cast<int>(m_vPressHeights.size()) - 1) * kTrackGap;
+        }
+        const double factor = pressContentH > 0 ? desiredContentH / pressContentH : 1.0;
+        syncTrackHeights();
+        const Sequence& seq = m_project->sequence();
+        std::size_t k = 0;
+        for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+            if ((seq.track(i).kind() == Track::Kind::Video) == video) {
+                const int base = k < m_vPressHeights.size() ? m_vPressHeights[k] : kDefaultTrackHeight;
+                m_trackH[i] = std::clamp(static_cast<int>(std::lround(base * factor)),
+                                         kMinTrackHeight, kMaxTrackHeight);
+                ++k;
+            }
+        }
+
+        const double contentH = sectionContentHeight(video);  // actual, with the clamped heights
+        double windowTop = (m_vdrag == VDrag::ZoomBottom) ? anchorFrac * contentH
+                                                          : anchorFrac * contentH - viewport;
+        windowTop = std::clamp(windowTop, 0.0, std::max(0.0, contentH - viewport));
+        if (video) {
+            m_videoScroll = std::max(0.0, contentH - viewport) - windowTop;
+        } else {
+            m_audioScroll = windowTop;
+        }
+    }
+    clampScrolls();
+    update();
+}
+
+TimelineWidget::DividerHit TimelineWidget::dividerHitTest(const QPoint& pos) const
+{
+    DividerHit hit;
+    if (!m_project || !m_project->hasActiveSequence()) {
+        return hit;
+    }
+    if (pos.y() < kRulerHeight || pos.x() >= contentRight()) {
+        return hit;  // ruler or vertical-bar gutter
+    }
+    // The A/V divider is grabbable anywhere along the timeline.
+    const TrackLayout lay = trackLayout();
+    if (std::abs(pos.y() - lay.dividerY) <= kDividerGrab) {
+        hit.kind = DividerKind::AV;
+        return hit;
+    }
+    // Individual track edges are grabbable only in the header column.
+    if (pos.x() >= kHeaderWidth) {
+        return hit;
+    }
+    const Sequence& seq = m_project->sequence();
+    for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+        const bool video = seq.track(i).kind() == Track::Kind::Video;
+        if (video ? (pos.y() >= lay.dividerY) : (pos.y() < lay.dividerY)) {
+            continue;
+        }
+        const int top = trackTop(i);
+        const int edgeY = video ? top : top + trackHeightAt(i);  // the track's resize edge
+        if (std::abs(pos.y() - edgeY) <= kDividerGrab) {
+            hit.kind = DividerKind::Track;
+            hit.trackIndex = i;
+            return hit;
+        }
+    }
+    return hit;
+}
+
+void TimelineWidget::updateDividerDrag(int y)
+{
+    if (m_divDrag == DividerKind::AV) {
+        const int avail = std::max(1, height() - kRulerHeight);
+        m_dividerFrac = std::clamp(static_cast<double>(y - kRulerHeight) / avail, 0.0, 1.0);
+    } else if (m_divDrag == DividerKind::Track && m_project) {
+        // Video tracks resize from the top edge (drag up grows), audio from the bottom.
+        const bool video = m_project->sequence().track(m_divTrack).kind() == Track::Kind::Video;
+        const int dy = y - m_divPressY;
+        const int newH = std::clamp(m_divPressHeight + (video ? -dy : dy), kMinTrackHeight, kMaxTrackHeight);
+        syncTrackHeights();
+        if (m_divTrack < m_trackH.size()) {
+            m_trackH[m_divTrack] = newH;
+        }
+    }
+    clampScrolls();
+    update();
 }
 
 void TimelineWidget::contextMenuEvent(QContextMenuEvent* event)
@@ -727,21 +1071,37 @@ void TimelineWidget::dropEvent(QDropEvent* event)
 
 void TimelineWidget::wheelEvent(QWheelEvent* event)
 {
-    const double steps = event->angleDelta().y() / 120.0;
+    // Holding Alt makes Qt/Windows deliver the wheel delta on the x axis, so take
+    // whichever axis carries it.
+    const QPoint delta = event->angleDelta();
+    const double steps = (delta.y() != 0 ? delta.y() : delta.x()) / 120.0;
     if (steps == 0.0) {
         return;
     }
 
-    if (event->modifiers() & Qt::ControlModifier) {
+    if (event->modifiers() & Qt::AltModifier) {
+        // Alt = horizontal zoom about the cursor.
         const double anchorX = event->position().x();
         const double anchorSeconds = (anchorX - kHeaderWidth) / m_pixelsPerSecond + m_scrollSeconds;
         m_pixelsPerSecond = std::clamp(m_pixelsPerSecond * std::pow(1.2, steps), minPixelsPerSecond(), 20000.0);
-        m_scrollSeconds = anchorSeconds - (anchorX - kHeaderWidth) / m_pixelsPerSecond;
-    } else {
-        m_scrollSeconds -= steps * 40.0 / m_pixelsPerSecond;
+        m_scrollSeconds = std::max(0.0, anchorSeconds - (anchorX - kHeaderWidth) / m_pixelsPerSecond);
+        m_lastPlayheadX = -1;
+        update();
+        emit viewChanged();
+        event->accept();
+        return;
+    }
+    if (event->modifiers() & Qt::ControlModifier) {
+        // Ctrl = scroll the section the cursor is over (does not change track height).
+        const bool video = event->position().y() < trackLayout().dividerY;
+        double& scroll = video ? m_videoScroll : m_audioScroll;
+        scroll = std::clamp(scroll - steps * 40.0, 0.0, maxScroll(video));
+        update();
+        event->accept();
+        return;
     }
 
-    m_scrollSeconds = std::max(0.0, m_scrollSeconds);
+    m_scrollSeconds = std::max(0.0, m_scrollSeconds - steps * 40.0 / m_pixelsPerSecond);
     m_lastPlayheadX = -1;
     update();
     emit viewChanged();
@@ -762,7 +1122,7 @@ void TimelineWidget::drawRuler(QPainter& painter)
 
     const double interval = niceInterval(m_pixelsPerSecond);
     const double first = std::floor(m_scrollSeconds / interval) * interval;
-    const double last = m_scrollSeconds + (width() - kHeaderWidth) / m_pixelsPerSecond;
+    const double last = m_scrollSeconds + (contentRight() - kHeaderWidth) / m_pixelsPerSecond;
 
     QFont font = painter.font();
     font.setPointSizeF(7.5);
@@ -772,6 +1132,9 @@ void TimelineWidget::drawRuler(QPainter& painter)
         const int x = xForTick(ticksFromSeconds(t));
         if (x < kHeaderWidth) {
             continue;
+        }
+        if (x >= contentRight()) {
+            break;
         }
         painter.setPen(kGridLine);
         painter.drawLine(x, kRulerHeight - 6, x, kRulerHeight);
@@ -793,9 +1156,9 @@ void TimelineWidget::drawTracks(QPainter& painter)
     const bool dragging = (m_drag == Drag::Move || m_drag == Drag::TrimHead || m_drag == Drag::TrimTail);
     const std::vector<ClipId> affected = dragging ? affectedByDrag() : std::vector<ClipId>{};
 
-    // Center divider between the video block (above) and audio block (below).
+    // A/V divider (drawn last, over the lanes) between the video section (above) and
+    // the audio section (below): a subtle line across the whole timeline.
     const TrackLayout lay = trackLayout();
-    painter.fillRect(QRect(0, lay.dividerY - 1, width(), 2), QColor(70, 71, 76));
 
     auto isAffected = [&](ClipId id) {
         return std::find(affected.begin(), affected.end(), id) != affected.end();
@@ -814,14 +1177,23 @@ void TimelineWidget::drawTracks(QPainter& painter)
     for (std::size_t i = 0; i < sequence.trackCount(); ++i) {
         const Track& track = sequence.track(i);
         const bool isVideo = track.kind() == Track::Kind::Video;
+        const int th = trackHeightAt(i);
         const int y = trackTop(i);
 
-        painter.fillRect(QRect(0, y, kHeaderWidth, kTrackHeight), kHeaderBackground);
-        painter.fillRect(QRect(kHeaderWidth, y, width() - kHeaderWidth, kTrackHeight),
+        // Clip each track to its section so a scrolled track can't paint into the
+        // ruler, the other section, or the vertical-bar gutter.
+        const QRect sectionRect = isVideo
+            ? QRect(0, kRulerHeight, contentRight(), lay.dividerY - kRulerHeight)
+            : QRect(0, lay.dividerY, contentRight(), height() - lay.dividerY);
+        painter.save();
+        painter.setClipRect(sectionRect);
+
+        painter.fillRect(QRect(0, y, kHeaderWidth, th), kHeaderBackground);
+        painter.fillRect(QRect(kHeaderWidth, y, contentRight() - kHeaderWidth, th),
                          isVideo ? kLaneVideo : kLaneAudio);
 
         painter.setPen(kText);
-        painter.drawText(QRect(0, y, kHeaderWidth - 8, kTrackHeight),
+        painter.drawText(QRect(0, y, kHeaderWidth - 8, th),
                          Qt::AlignRight | Qt::AlignVCenter, QString::fromStdString(track.name()));
 
         for (const Clip& clip : track.clips()) {
@@ -842,7 +1214,7 @@ void TimelineWidget::drawTracks(QPainter& painter)
 
             const int x0 = xForTick(start);
             const int x1 = xForTick(start + duration);
-            if (x1 < kHeaderWidth || x0 > width()) {
+            if (x1 < kHeaderWidth || x0 > contentRight()) {
                 continue;
             }
 
@@ -852,63 +1224,80 @@ void TimelineWidget::drawTracks(QPainter& painter)
             if (trimming && isAffected(clip.id)) {
                 const int gx0 = std::max(xForTick(clip.timelineStart), kHeaderWidth);
                 const int gx1 = xForTick(clip.range().end());
-                QRect ghost(gx0, y + 3, gx1 - gx0, kTrackHeight - 6);
+                QRect ghost(gx0, y + 3, gx1 - gx0, th - 6);
                 QPen ghostPen(kGhost, 1, Qt::DashLine);
                 painter.setPen(ghostPen);
                 painter.setBrush(Qt::NoBrush);
                 painter.drawRoundedRect(ghost, 3, 3);
             }
 
-            QRect box(std::max(x0, kHeaderWidth), y + 3, x1 - std::max(x0, kHeaderWidth), kTrackHeight - 6);
+            QRect box(std::max(x0, kHeaderWidth), y + 3, x1 - std::max(x0, kHeaderWidth), th - 6);
             if (box.width() < 1) {
                 box.setWidth(1);
             }
 
-            const QColor fill = clip.label > 0 ? labelColor(clip.label)
-                                               : (isVideo ? kClipVideo : kClipAudio);
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(fill);
-            painter.drawRoundedRect(box, 3, 3);
+            // A clip is a label-colored name strip on top of a darker preview body.
+            // Default color follows the source, not the track: a video's audio half is
+            // blue like its video; green is reserved for audio-only sources.
+            const MediaSource* clipMedia = m_project->media(clip.source);
+            const bool audioOnly = clipMedia && !clipMedia->hasVideo;
+            const QColor stripColor = clip.label > 0 ? labelColor(clip.label)
+                                                     : (audioOnly ? kClipAudio : kClipVideo);
+            const QColor bodyColor = stripColor.darker(190);
+            const int stripH = std::min(kClipLabelStrip, box.height());
+            const QRect content(box.left(), box.top() + stripH, box.width(), box.height() - stripH);
 
-            if (m_preview && box.width() > 4) {
+            painter.save();
+            QPainterPath clipPath;
+            clipPath.addRoundedRect(box, 3, 3);
+            painter.setClipPath(clipPath, Qt::IntersectClip);
+            painter.setPen(Qt::NoPen);
+            painter.fillRect(box, bodyColor);
+            painter.fillRect(QRect(box.left(), box.top(), box.width(), stripH), stripColor);
+
+            // Preview fills the body under the strip; omit it when the clip is too small.
+            const bool roomForPreview = box.width() >= 24 && content.height() >= 12;
+            if (m_preview && roomForPreview) {
                 const int x0f = xForTick(start);
                 const int fullW = xForTick(start + duration) - x0f;
                 const double srcStartSec = secondsFromTicks(sourceIn);
                 const double srcSpanSec = secondsFromTicks(duration);
                 if (isVideo) {
-                    drawThumbnails(painter, clip, box, x0f, fullW, srcStartSec, srcSpanSec);
+                    drawThumbnails(painter, clip, content, x0f, fullW, srcStartSec, srcSpanSec);
                 } else {
-                    drawWaveform(painter, clip, box, x0f, fullW, srcStartSec, srcSpanSec);
+                    drawWaveform(painter, clip, content, x0f, fullW, srcStartSec, srcSpanSec);
                 }
+            }
+            painter.restore();
+
+            // Filename in the strip, legible against its color.
+            if (box.width() > 28) {
+                QString name = "clip";
+                if (clipMedia) {
+                    name = QFileInfo(QString::fromStdString(clipMedia->path)).fileName();
+                }
+                const QFontMetrics fm(painter.font());
+                const QString elided = fm.elidedText(name, Qt::ElideRight, box.width() - 10);
+                painter.setPen(stripColor.lightnessF() > 0.6 ? QColor(20, 20, 22) : QColor(238, 238, 240));
+                painter.drawText(box.left() + 5, box.top() + (stripH + fm.ascent() - fm.descent()) / 2, elided);
             }
 
             if (isHighlighted(clip)) {
                 painter.setPen(QPen(kSelected, 2));
             } else {
-                painter.setPen(fill.lighter(140));
+                painter.setPen(stripColor.lighter(140));
             }
             painter.setBrush(Qt::NoBrush);
             painter.drawRoundedRect(box, 3, 3);
-
-            if (box.width() > 40) {
-                QString label = "clip";
-                if (const MediaSource* media = m_project->media(clip.source)) {
-                    label = QFileInfo(QString::fromStdString(media->path)).fileName();
-                }
-                const QFontMetrics fm(painter.font());
-                const QString elided = fm.elidedText(label, Qt::ElideRight, box.width() - 12);
-                const QRect textRect = fm.boundingRect(elided).adjusted(0, 0, 6, 2);
-                // Dark pill so the name stays legible over thumbnails.
-                painter.setPen(Qt::NoPen);
-                painter.setBrush(QColor(0, 0, 0, 120));
-                painter.drawRoundedRect(QRect(box.left() + 3, box.top() + 3, textRect.width(), fm.height() + 2), 2, 2);
-                painter.setPen(QColor(235, 235, 235));
-                painter.drawText(box.left() + 6, box.top() + 3 + fm.ascent() + 1, elided);
-            }
         }
 
         painter.setPen(kGridLine);
-        painter.drawLine(0, y + kTrackHeight, width(), y + kTrackHeight);
+        painter.drawLine(0, y + th, contentRight(), y + th);
+        // Thin, grabbable divider in the header at the track's resize edge
+        // (video resizes from its top edge, audio from its bottom edge).
+        const int edgeY = isVideo ? y : y + th;
+        painter.fillRect(QRect(0, edgeY, kHeaderWidth, 1), kHeaderDivider);
+        painter.restore();
     }
 
     // Destination silhouette(s) for a move: only the dragged clip changes track;
@@ -930,14 +1319,17 @@ void TimelineWidget::drawTracks(QPainter& painter)
                 }
                 const int destY = levelToY(destLevel, isVideo);
                 const int dx0 = std::max(xForTick(destStart), kHeaderWidth);
-                const int dx1 = xForTick(destStart + clip.duration);
+                const int dx1 = std::min(xForTick(destStart + clip.duration), contentRight());
                 if (dx1 <= kHeaderWidth) {
                     continue;
                 }
-                painter.drawRoundedRect(QRect(dx0, destY + 3, dx1 - dx0, kTrackHeight - 6), 3, 3);
+                painter.drawRoundedRect(QRect(dx0, destY + 3, dx1 - dx0, heightOfLevel(isVideo, destLevel) - 6), 3, 3);
             }
         }
     }
+
+    // Drawn on top of the lanes so it stays visible where the two sections meet.
+    painter.fillRect(QRect(0, lay.dividerY - 1, contentRight(), 2), kAVDivider);
 }
 
 void TimelineWidget::drawThumbnails(QPainter& painter, const Clip& clip, const QRect& box, int x0,
@@ -947,13 +1339,15 @@ void TimelineWidget::drawThumbnails(QPainter& painter, const Clip& clip, const Q
     if (!thumbs || thumbs->images.empty() || fullWidth <= 0) {
         return;
     }
-    const int tileW = thumbs->images.front().width();
-    if (tileW <= 0) {
+    const QImage& first = thumbs->images.front();
+    if (first.width() <= 0 || first.height() <= 0) {
         return;
     }
+    // Scale each thumbnail to the body height while keeping its aspect ratio.
+    const int tileW = std::max(1, first.width() * box.height() / first.height());
 
     painter.save();
-    painter.setClipRect(box);
+    painter.setClipRect(box, Qt::IntersectClip);  // stay within the track's section clip
     for (int px = box.left(); px < box.right(); px += tileW) {
         const double fraction = std::clamp((px + tileW / 2.0 - x0) / fullWidth, 0.0, 1.0);
         const double srcSec = srcStart + fraction * srcSpan;
@@ -968,23 +1362,53 @@ void TimelineWidget::drawWaveform(QPainter& painter, const Clip& clip, const QRe
                                   int fullWidth, double srcStart, double srcSpan)
 {
     const PreviewCache::Waveform* wave = m_preview->waveform(clip.source);
-    if (!wave || wave->peaks.empty() || fullWidth <= 0) {
+    if (!wave || wave->left.empty() || fullWidth <= 0) {
         return;
     }
 
-    const int centerY = box.center().y();
-    const double halfH = box.height() / 2.0 - 2.0;
-    painter.save();
-    painter.setClipRect(box);
-    // A lighter shade of the clip's label color, or the default green when unlabeled.
-    painter.setPen(clip.label > 0 ? labelColor(clip.label).lighter(160) : kWaveform);
-    for (int x = box.left(); x < box.right(); ++x) {
+    const MediaSource* wm = m_project->media(clip.source);
+    const bool audioOnly = wm && !wm->hasVideo;
+    const QColor col = clip.label > 0 ? labelColor(clip.label).lighter(160)
+                                      : (audioOnly ? kWaveform : kClipVideo.lighter(160));
+    auto peakAt = [&](int x, const std::vector<float>& ch) -> float {
         const double fraction = std::clamp((x - x0 + 0.5) / fullWidth, 0.0, 1.0);
         const double srcSec = srcStart + fraction * srcSpan;
         const size_t bucket = static_cast<size_t>(srcSec * wave->bucketsPerSecond);
-        const float peak = bucket < wave->peaks.size() ? wave->peaks[bucket] : 0.0f;
-        const int h = static_cast<int>(peak * halfH);
-        painter.drawLine(x, centerY - h, x, centerY + h);
+        return bucket < ch.size() ? ch[bucket] : 0.0f;
+    };
+
+    painter.save();
+    painter.setClipRect(box, Qt::IntersectClip);  // stay within the track's section clip
+    painter.setPen(col);
+
+    // Tall tracks split into L/R lanes; short ones show a single merged envelope.
+    if (box.height() >= 40) {
+        const int halfBox = box.height() / 2;
+        const int cyL = box.top() + halfBox / 2;
+        const int cyR = box.top() + halfBox + (box.height() - halfBox) / 2;
+        const double hL = halfBox / 2.0 - 1.0;
+        const double hR = (box.height() - halfBox) / 2.0 - 1.0;
+        for (int x = box.left(); x < box.right(); ++x) {
+            const int l = static_cast<int>(peakAt(x, wave->left) * hL);
+            const int r = static_cast<int>(peakAt(x, wave->right) * hR);
+            painter.drawLine(x, cyL - l, x, cyL + l);
+            painter.drawLine(x, cyR - r, x, cyR + r);
+        }
+        painter.setPen(QColor(col.red(), col.green(), col.blue(), 70));
+        painter.drawLine(box.left(), box.top() + halfBox, box.right(), box.top() + halfBox);
+        if (box.width() > 30) {
+            painter.setPen(QColor(210, 212, 218));
+            painter.drawText(box.left() + 3, cyL + 4, "L");
+            painter.drawText(box.left() + 3, cyR + 4, "R");
+        }
+    } else {
+        const int cy = box.center().y();
+        const double h = box.height() / 2.0 - 2.0;
+        for (int x = box.left(); x < box.right(); ++x) {
+            const float peak = std::max(peakAt(x, wave->left), peakAt(x, wave->right));
+            const int hh = static_cast<int>(peak * h);
+            painter.drawLine(x, cy - hh, x, cy + hh);
+        }
     }
     painter.restore();
 }
@@ -995,18 +1419,25 @@ void TimelineWidget::drawDropGhost(QPainter& painter)
         return;
     }
     const int x0 = std::max(xForTick(m_dropStart), kHeaderWidth);
-    const int x1 = xForTick(m_dropStart + m_dropDuration);
+    const int x1 = std::min(xForTick(m_dropStart + m_dropDuration), contentRight());
     if (x1 <= kHeaderWidth) {
         return;
     }
 
+    const TrackLayout lay = trackLayout();
     QPen pen(kSelected, 1, Qt::DashLine);
     painter.setPen(pen);
     painter.setBrush(QColor(kSelected.red(), kSelected.green(), kSelected.blue(), 40));
 
     auto drawLane = [&](bool video) {
+        const QRect sectionRect = video
+            ? QRect(0, kRulerHeight, contentRight(), lay.dividerY - kRulerHeight)
+            : QRect(0, lay.dividerY, contentRight(), height() - lay.dividerY);
+        painter.save();
+        painter.setClipRect(sectionRect);
         const int y = levelToY(m_dropLevel, video);  // handles levels beyond existing tracks
-        painter.drawRoundedRect(QRect(x0, y + 3, x1 - x0, kTrackHeight - 6), 3, 3);
+        painter.drawRoundedRect(QRect(x0, y + 3, x1 - x0, heightOfLevel(video, m_dropLevel) - 6), 3, 3);
+        painter.restore();
     };
     if (m_dropVideo) {
         drawLane(true);
@@ -1019,7 +1450,7 @@ void TimelineWidget::drawDropGhost(QPainter& painter)
 void TimelineWidget::drawPlayhead(QPainter& painter)
 {
     const int x = xForTick(m_playhead);
-    if (x < kHeaderWidth) {
+    if (x < kHeaderWidth || x >= contentRight()) {
         return;
     }
     painter.setPen(QPen(kPlayhead, 1));
@@ -1029,6 +1460,70 @@ void TimelineWidget::drawPlayhead(QPainter& painter)
     painter.setPen(Qt::NoPen);
     painter.setBrush(kPlayhead);
     painter.drawPolygon(handle);
+}
+
+QRect TimelineWidget::vbarRect(bool video) const
+{
+    const TrackLayout lay = trackLayout();
+    return video ? QRect(contentRight(), kRulerHeight, kVBarWidth, lay.dividerY - kRulerHeight)
+                 : QRect(contentRight(), lay.dividerY, kVBarWidth, height() - lay.dividerY);
+}
+
+QRect TimelineWidget::vbarHandle(bool video) const
+{
+    const QRect bar = vbarRect(video);
+    const int inset = 2;
+    const double contentH = sectionContentHeight(video);
+    const double viewport = sectionViewport(video);
+    if (contentH <= viewport || contentH <= 0.0 || bar.height() <= 0) {
+        return QRect(bar.left() + inset, bar.top() + inset, bar.width() - 2 * inset, bar.height() - 2 * inset);
+    }
+    const double windowTop = video ? (contentH - viewport - m_videoScroll) : m_audioScroll;
+    const double f0 = std::clamp(windowTop / contentH, 0.0, 1.0);
+    const double f1 = std::clamp((windowTop + viewport) / contentH, 0.0, 1.0);
+    int hy0 = bar.top() + static_cast<int>(std::lround(f0 * bar.height()));
+    int hy1 = bar.top() + static_cast<int>(std::lround(f1 * bar.height()));
+    if (hy1 - hy0 < kVBarMinHandle) {
+        hy1 = hy0 + kVBarMinHandle;
+    }
+    return QRect(bar.left() + inset, hy0, bar.width() - 2 * inset, hy1 - hy0);
+}
+
+void TimelineWidget::drawVBars(QPainter& painter)
+{
+    if (!m_project) {
+        return;
+    }
+    const QColor groove(26, 27, 30), handleC(78, 80, 86), handleA(104, 106, 114);
+    const QColor knob(176, 178, 186), knobA(214, 216, 224);
+
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    auto drawBar = [&](bool video) {
+        if (sectionTrackCount(video) <= 0) {
+            return;
+        }
+        const QRect bar = vbarRect(video);
+        if (bar.height() < kVBarMinHandle) {
+            return;
+        }
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(groove);
+        painter.drawRoundedRect(bar.adjusted(2, 2, -2, -2), 4, 4);
+
+        const bool active = (m_vdrag != VDrag::None && m_vdragVideo == video);
+        const QRect h = vbarHandle(video);
+        painter.setBrush(active ? handleA : handleC);
+        painter.drawRoundedRect(h, 4, 4);
+
+        const double cx = h.center().x() + 0.5;
+        const double r = h.width() / 2.0;
+        painter.setBrush(active ? knobA : knob);
+        painter.drawEllipse(QPointF(cx, h.top() + r), r, r);
+        painter.drawEllipse(QPointF(cx, h.bottom() - r), r, r);
+    };
+    drawBar(true);
+    drawBar(false);
+    painter.setRenderHint(QPainter::Antialiasing, false);
 }
 
 void TimelineWidget::paintEvent(QPaintEvent*)
@@ -1046,10 +1541,13 @@ void TimelineWidget::paintEvent(QPaintEvent*)
         return;
     }
 
+    syncTrackHeights();  // keep per-track heights sized to the current track list
+    clampScrolls();  // track counts / size may have changed since the last paint
     drawTracks(painter);
     drawDropGhost(painter);
     drawRuler(painter);
     drawPlayhead(painter);
+    drawVBars(painter);
 }
 
 }  // namespace hopline

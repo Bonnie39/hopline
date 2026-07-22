@@ -24,7 +24,8 @@ class PreviewCache : public QObject {
 
 public:
     struct Waveform {
-        std::vector<float> peaks;         // max abs amplitude per bucket, 0..1
+        std::vector<float> left;          // max abs amplitude per bucket, 0..1
+        std::vector<float> right;         // == left for mono sources
         int bucketsPerSecond = 0;
     };
 

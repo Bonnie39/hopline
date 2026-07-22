@@ -11,7 +11,7 @@
 namespace hopline {
 namespace {
 
-constexpr int kWaveformSampleRate = 8000;   // mono; plenty for an envelope
+constexpr int kWaveformSampleRate = 8000;   // per channel; plenty for an envelope
 constexpr int kBucketsPerSecond = 100;      // 10 ms peaks
 constexpr int kThumbHeight = 48;
 constexpr int kMaxThumbs = 40;
@@ -24,28 +24,33 @@ PreviewCache::Waveform generateWaveform(const QString& path)
 
     AudioDecoder decoder;
     std::string error;
-    if (!decoder.open(path.toStdString(), kWaveformSampleRate, 1, error)) {
+    // Decode stereo so tall audio tracks can show L/R; mono sources upmix to L==R.
+    if (!decoder.open(path.toStdString(), kWaveformSampleRate, 2, error)) {
         return wave;
     }
 
-    std::vector<float>& peaks = wave.peaks;
-    int64_t sampleIndex = 0;
+    std::vector<float>& left = wave.left;
+    std::vector<float>& right = wave.right;
+    int64_t frameIndex = 0;  // one frame = one L/R pair
     std::vector<float> chunk;
     while (decoder.nextChunk(chunk)) {
-        for (float sample : chunk) {
-            const size_t bucket = static_cast<size_t>(sampleIndex * kBucketsPerSecond / kWaveformSampleRate);
-            if (bucket >= peaks.size()) {
-                peaks.resize(bucket + 1024, 0.0f);
+        for (size_t i = 0; i + 1 < chunk.size(); i += 2) {
+            const size_t bucket = static_cast<size_t>(frameIndex * kBucketsPerSecond / kWaveformSampleRate);
+            if (bucket >= left.size()) {
+                left.resize(bucket + 1024, 0.0f);
+                right.resize(bucket + 1024, 0.0f);
             }
-            peaks[bucket] = std::max(peaks[bucket], std::fabs(sample));
-            ++sampleIndex;
+            left[bucket] = std::max(left[bucket], std::fabs(chunk[i]));
+            right[bucket] = std::max(right[bucket], std::fabs(chunk[i + 1]));
+            ++frameIndex;
         }
         chunk.clear();
     }
 
-    const size_t used = static_cast<size_t>(sampleIndex * kBucketsPerSecond / kWaveformSampleRate) + 1;
-    if (peaks.size() > used) {
-        peaks.resize(used);
+    const size_t used = static_cast<size_t>(frameIndex * kBucketsPerSecond / kWaveformSampleRate) + 1;
+    if (left.size() > used) {
+        left.resize(used);
+        right.resize(used);
     }
     return wave;
 }

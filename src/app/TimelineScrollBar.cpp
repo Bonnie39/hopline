@@ -139,7 +139,7 @@ void TimelineScrollBar::mouseMoveEvent(QMouseEvent* event)
             hx1 = hx0 + kMinHandlePx;
         }
         const bool onEnd = (x >= hx0 - kGrip && x <= hx0 + kGrip) || (x >= hx1 - kGrip && x <= hx1 + kGrip);
-        setCursor(onEnd ? Qt::SizeHorCursor : Qt::ArrowCursor);
+        setCursor(onEnd ? Qt::PointingHandCursor : Qt::ArrowCursor);  // knobs zoom, body scrolls
         return;
     }
 
