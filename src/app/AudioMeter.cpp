@@ -26,7 +26,12 @@ float toFraction(float lin)
 AudioMeter::AudioMeter(QWidget* parent)
     : QWidget(parent)
 {
+    // The bars cap at kMaxBarsWidth, so the meter never needs to be wide. Capping the
+    // width also stops it absorbing horizontal slack as the corner dock on each
+    // restore — which was growing it a little on every relaunch — and clamps any
+    // already-bloated saved layout back down.
     setMinimumWidth(44);
+    setMaximumWidth(72);
 }
 
 QSize AudioMeter::sizeHint() const { return { 60, 220 }; }
