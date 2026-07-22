@@ -1,8 +1,10 @@
 #include "engine/Player.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -14,6 +16,7 @@ namespace {
 constexpr size_t kQueueDepth = 8;
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
+constexpr int64_t kMixChunkFrames = 1024;
 
 using namespace std::chrono_literals;
 
@@ -29,6 +32,53 @@ VideoFrame makeBlack(int width, int height, double pts)
     }
     return frame;
 }
+
+// One audio track's decoder plus its leftover-sample state. A track has at most
+// one clip at a time, so a decoder per track is enough; kept across segments so a
+// clip that spans a cut keeps streaming without a reseek.
+struct TrackMix {
+    AudioDecoder decoder;
+    ClipId loaded = kInvalidClip;
+    MediaId source = kInvalidMedia;
+    std::vector<float> chunk;
+    size_t consumed = 0;
+    bool ended = false;
+
+    void resetStream()
+    {
+        chunk.clear();
+        consumed = 0;
+        ended = false;
+    }
+
+    // Adds up to `frames` interleaved frames into `out`; exhausted source is silence.
+    void mixInto(float* out, int64_t frames, int channels, std::atomic<bool>& stop)
+    {
+        int64_t produced = 0;
+        while (produced < frames && !ended && !stop.load(std::memory_order_relaxed)) {
+            if (consumed >= chunk.size()) {
+                chunk.clear();
+                consumed = 0;
+                if (!decoder.nextChunk(chunk)) {
+                    ended = true;
+                    break;
+                }
+                if (chunk.empty()) {
+                    continue;
+                }
+            }
+            const int64_t avail = static_cast<int64_t>(chunk.size() - consumed) / channels;
+            const int64_t take = std::min(frames - produced, avail);
+            const size_t floats = static_cast<size_t>(take) * channels;
+            const size_t base = static_cast<size_t>(produced) * channels;
+            for (size_t i = 0; i < floats; ++i) {
+                out[base + i] += chunk[consumed + i];
+            }
+            consumed += floats;
+            produced += take;
+        }
+    }
+};
 
 }  // namespace
 
@@ -81,13 +131,11 @@ void Player::close()
 {
     stopThreads();
     m_audioOut.close();
-    m_audio.close();
     m_video.close();
     m_queue.clear();
     m_clock.pause();
     m_clock.reset(0.0);
     m_curVideoSource = kInvalidMedia;
-    m_curAudioSource = kInvalidMedia;
     m_eof = false;
     m_dropped = 0;
     m_open = false;
@@ -133,24 +181,6 @@ bool Player::ensureVideoSource(MediaId id)
         return false;
     }
     m_curVideoSource = id;
-    return true;
-}
-
-bool Player::ensureAudioSource(MediaId id)
-{
-    if (m_curAudioSource == id && m_audio.isOpen()) {
-        return true;
-    }
-    const auto it = m_paths.find(id);
-    if (it == m_paths.end()) {
-        return false;
-    }
-    std::string error;
-    if (!m_audio.open(it->second, kSampleRate, kChannels, error)) {
-        m_curAudioSource = kInvalidMedia;
-        return false;
-    }
-    m_curAudioSource = id;
     return true;
 }
 
@@ -224,9 +254,10 @@ void Player::audioLoop()
     const Tick seqEnd = m_seq.duration();
     const std::vector<Tick> cuts = m_seq.cutPoints(Track::Kind::Audio);
 
-    // Absolute sample target keeps timeline alignment exact: rounding per segment
-    // would accumulate and drift the audio clock off the video.
-    int64_t framesWritten = 0;
+    // Absolute sample target keeps timeline alignment exact across cuts. Seed the
+    // running count from the start position, so after a seek each segment writes its
+    // own length (starting from 0 would misalign audio past the first cut).
+    int64_t framesWritten = std::llround(secondsFromTicks(m_startTick) * kSampleRate);
 
     auto writeFloats = [&](const float* data, size_t count) {
         size_t off = 0;
@@ -239,50 +270,65 @@ void Player::audioLoop()
         }
     };
 
-    auto writeSilence = [&](int64_t frames) {
-        static thread_local std::vector<float> zeros(1024 * kChannels, 0.0f);
-        int64_t remaining = frames * kChannels;
-        while (remaining > 0 && !m_stop) {
-            const size_t n = static_cast<size_t>(std::min<int64_t>(remaining, zeros.size()));
-            writeFloats(zeros.data(), n);
-            remaining -= n;
-        }
-    };
+    // A decoder per audio track, kept across segments so a clip spanning a cut keeps
+    // streaming. All active tracks are summed each output chunk (basic mix; per-clip
+    // gain/pan is deferred).
+    std::unordered_map<std::size_t, TrackMix> mixes;
+    std::vector<TrackMix*> active;
+    std::vector<float> mix;
 
     Tick segStart = m_startTick;
     while (!m_stop && segStart < seqEnd) {
         const Tick segEnd = nextCut(cuts, segStart, seqEnd);
         const int64_t target = std::llround(secondsFromTicks(segEnd) * kSampleRate);
-        const Clip* clip = m_seq.firstAudioClipAt(segStart);
 
-        if (clip && ensureAudioSource(clip->source)) {
-            m_audio.seek(secondsFromTicks(clip->sourceTimeAt(segStart)));
-
-            std::vector<float> chunk;
-            size_t consumed = 0;
-            while (framesWritten < target && !m_stop) {
-                if (consumed >= chunk.size()) {
-                    chunk.clear();
-                    consumed = 0;
-                    if (!m_audio.nextChunk(chunk)) {
-                        break;  // source ended early; padded with silence below
+        // Position each audio track's decoder for this segment.
+        active.clear();
+        for (std::size_t i = 0; i < m_seq.trackCount() && !m_stop; ++i) {
+            const Track& track = m_seq.track(i);
+            if (track.kind() != Track::Kind::Audio) {
+                continue;
+            }
+            const Clip* clip = track.clipAt(segStart);
+            if (!clip) {
+                continue;  // this track is silent across the segment
+            }
+            TrackMix& tm = mixes[i];
+            const bool sameClip = tm.loaded == clip->id && tm.source == clip->source && tm.decoder.isOpen();
+            if (!sameClip) {
+                if (tm.source != clip->source || !tm.decoder.isOpen()) {
+                    tm.decoder.close();
+                    const auto it = m_paths.find(clip->source);
+                    if (it != m_paths.end()) {
+                        std::string err;
+                        tm.decoder.open(it->second, kSampleRate, kChannels, err);
                     }
-                    if (chunk.empty()) {
-                        continue;
-                    }
+                    tm.source = clip->source;
                 }
-                const int64_t availFrames = (chunk.size() - consumed) / kChannels;
-                const int64_t takeFrames = std::min<int64_t>(target - framesWritten, availFrames);
-                const size_t takeFloats = static_cast<size_t>(takeFrames) * kChannels;
-                writeFloats(chunk.data() + consumed, takeFloats);
-                consumed += takeFloats;
-                framesWritten += takeFrames;
+                if (tm.decoder.isOpen()) {
+                    tm.decoder.seek(secondsFromTicks(clip->sourceTimeAt(segStart)));
+                }
+                tm.resetStream();
+                tm.loaded = clip->id;
+            }
+            if (tm.decoder.isOpen()) {
+                active.push_back(&tm);
             }
         }
 
-        if (framesWritten < target) {
-            writeSilence(target - framesWritten);
-            framesWritten = target;
+        // Write exactly (segEnd - segStart) frames of the summed mix (silence when
+        // no track is active).
+        while (framesWritten < target && !m_stop) {
+            const int64_t want = std::min<int64_t>(kMixChunkFrames, target - framesWritten);
+            mix.assign(static_cast<size_t>(want) * kChannels, 0.0f);
+            for (TrackMix* tm : active) {
+                tm->mixInto(mix.data(), want, kChannels, m_stop);
+            }
+            for (float& s : mix) {
+                s = std::clamp(s, -1.0f, 1.0f);
+            }
+            writeFloats(mix.data(), mix.size());
+            framesWritten += want;
         }
         segStart = segEnd;
     }
@@ -328,8 +374,7 @@ void Player::restartAt(Tick target, bool resumePlaying)
     target = dur > 0 ? std::clamp<Tick>(target, 0, dur) : std::max<Tick>(0, target);
 
     m_startTick = target;
-    m_curVideoSource = kInvalidMedia;  // force a re-seek on both decoders
-    m_curAudioSource = kInvalidMedia;
+    m_curVideoSource = kInvalidMedia;  // force a re-seek on the video decoder
 
     m_queue.clear();
     m_audioOut.buffer().clear();

@@ -65,7 +65,6 @@ private:
 
     void restartAt(Tick target, bool resumePlaying);
     bool ensureVideoSource(MediaId id);
-    bool ensureAudioSource(MediaId id);
     bool decodeVideoSegment(const Clip& clip, Tick segStart, Tick segEnd);
     bool emitBlackRange(Tick from, Tick to);
     Tick nextCut(const std::vector<Tick>& cuts, Tick after, Tick fallback) const;
@@ -74,13 +73,11 @@ private:
     std::unordered_map<MediaId, std::string> m_paths;
 
     VideoDecoder m_video;
-    AudioDecoder m_audio;
     AudioOutput m_audioOut;
     FrameQueue m_queue;
     Clock m_clock;
 
     MediaId m_curVideoSource = kInvalidMedia;
-    MediaId m_curAudioSource = kInvalidMedia;
     Tick m_startTick = 0;
 
     std::thread m_videoThread;
