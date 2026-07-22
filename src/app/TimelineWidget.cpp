@@ -13,6 +13,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPixmap>
+#include <QResizeEvent>
 #include <QUrl>
 #include <QWheelEvent>
 
@@ -91,6 +92,40 @@ void TimelineWidget::setProject(const Project* project)
 {
     m_project = project;
     update();
+    emit viewChanged();
+}
+
+double TimelineWidget::viewStart() const
+{
+    return m_scrollSeconds;
+}
+
+double TimelineWidget::viewSpan() const
+{
+    const int usable = width() - kHeaderWidth;
+    return usable > 0 ? usable / m_pixelsPerSecond : 0.0;
+}
+
+double TimelineWidget::viewTotal() const
+{
+    double dur = 0.0;
+    if (m_project) {
+        dur = secondsFromTicks(m_project->sequence().duration());
+    }
+    return std::max(dur, viewStart() + viewSpan());
+}
+
+void TimelineWidget::setView(double start, double span)
+{
+    const int usable = width() - kHeaderWidth;
+    if (usable <= 0 || span <= 1e-6) {
+        return;
+    }
+    m_pixelsPerSecond = std::clamp(usable / span, minPixelsPerSecond(), 20000.0);
+    m_scrollSeconds = std::max(0.0, start);
+    m_lastPlayheadX = -1;
+    update();
+    emit viewChanged();  // reflect clamping back to the scroll bar
 }
 
 void TimelineWidget::setPlayhead(Tick time)
@@ -124,6 +159,7 @@ void TimelineWidget::zoomToFit()
         m_scrollSeconds = 0.0;
         m_lastPlayheadX = -1;
         update();
+        emit viewChanged();
     }
 }
 
@@ -136,6 +172,18 @@ Tick TimelineWidget::tickForX(int x) const
 {
     const double seconds = (x - kHeaderWidth) / m_pixelsPerSecond + m_scrollSeconds;
     return ticksFromSeconds(std::max(0.0, seconds));
+}
+
+// The longer the timeline, the further out we can zoom — always at least far
+// enough to fit the whole sequence in the visible width.
+double TimelineWidget::minPixelsPerSecond() const
+{
+    const int usable = width() - kHeaderWidth;
+    const double dur = m_project ? secondsFromTicks(m_project->sequence().duration()) : 0.0;
+    if (usable <= 0 || dur <= 0.0) {
+        return 1.0;
+    }
+    return std::min(1.0, usable / dur);
 }
 
 int TimelineWidget::trackTop(std::size_t index) const
@@ -380,6 +428,13 @@ void TimelineWidget::scrubTo(int x)
 
 void TimelineWidget::mousePressEvent(QMouseEvent* event)
 {
+    if (event->button() == Qt::MiddleButton) {
+        m_drag = Drag::Pan;
+        m_panStartX = event->position().toPoint().x();
+        m_panStartScroll = m_scrollSeconds;
+        setCursor(Qt::ClosedHandCursor);
+        return;
+    }
     if (event->button() != Qt::LeftButton) {
         return;
     }
@@ -426,6 +481,14 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event)
         scrubTo(pos.x());
         return;
     }
+    if (m_drag == Drag::Pan) {
+        const int dx = pos.x() - m_panStartX;
+        m_scrollSeconds = std::max(0.0, m_panStartScroll - dx / m_pixelsPerSecond);
+        m_lastPlayheadX = -1;
+        update();
+        emit viewChanged();
+        return;
+    }
     if (m_drag == Drag::None) {
         updateHoverCursor(pos);
         return;
@@ -467,6 +530,13 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event)
 
 void TimelineWidget::mouseReleaseEvent(QMouseEvent* event)
 {
+    if (event->button() == Qt::MiddleButton) {
+        if (m_drag == Drag::Pan) {
+            m_drag = Drag::None;
+            unsetCursor();
+        }
+        return;
+    }
     if (event->button() != Qt::LeftButton) {
         return;
     }
@@ -665,7 +735,7 @@ void TimelineWidget::wheelEvent(QWheelEvent* event)
     if (event->modifiers() & Qt::ControlModifier) {
         const double anchorX = event->position().x();
         const double anchorSeconds = (anchorX - kHeaderWidth) / m_pixelsPerSecond + m_scrollSeconds;
-        m_pixelsPerSecond = std::clamp(m_pixelsPerSecond * std::pow(1.2, steps), 1.0, 20000.0);
+        m_pixelsPerSecond = std::clamp(m_pixelsPerSecond * std::pow(1.2, steps), minPixelsPerSecond(), 20000.0);
         m_scrollSeconds = anchorSeconds - (anchorX - kHeaderWidth) / m_pixelsPerSecond;
     } else {
         m_scrollSeconds -= steps * 40.0 / m_pixelsPerSecond;
@@ -674,7 +744,13 @@ void TimelineWidget::wheelEvent(QWheelEvent* event)
     m_scrollSeconds = std::max(0.0, m_scrollSeconds);
     m_lastPlayheadX = -1;
     update();
+    emit viewChanged();
     event->accept();
+}
+
+void TimelineWidget::resizeEvent(QResizeEvent*)
+{
+    emit viewChanged();  // visible span depends on width
 }
 
 void TimelineWidget::drawRuler(QPainter& painter)

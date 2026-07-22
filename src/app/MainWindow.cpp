@@ -28,6 +28,7 @@
 #include "app/PreviewCache.h"
 #include "app/PreviewWidget.h"
 #include "app/SequenceDialog.h"
+#include "app/TimelineScrollBar.h"
 #include "app/TimelineWidget.h"
 #include "app/ToolboxWidget.h"
 #include "media/MediaProbe.h"
@@ -185,12 +186,20 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_seqTabs, &QTabBar::tabCloseRequested, this, &MainWindow::closeSequenceTab);
 
+    m_timelineScroll = new TimelineScrollBar(this);
+    connect(m_timeline, &TimelineWidget::viewChanged, this, [this] {
+        m_timelineScroll->setRange(m_timeline->viewTotal(), m_timeline->viewStart(), m_timeline->viewSpan());
+    });
+    connect(m_timelineScroll, &TimelineScrollBar::rangeChanged, this,
+            [this](double start, double span) { m_timeline->setView(start, span); });
+
     auto* timelinePanel = new QWidget(this);
     auto* timelineLayout = new QVBoxLayout(timelinePanel);
     timelineLayout->setContentsMargins(0, 0, 0, 0);
     timelineLayout->setSpacing(0);
     timelineLayout->addWidget(m_seqTabs);
     timelineLayout->addWidget(m_timeline, 1);
+    timelineLayout->addWidget(m_timelineScroll);
 
     m_timelineDock = new QDockWidget("Timeline", this);
     m_timelineDock->setObjectName("timelineDock");
@@ -417,6 +426,7 @@ void MainWindow::activateSequence(SequenceId sequence)
     m_timeline->clearSelection();
     m_timeline->setPlayhead(0);
     m_timeline->update();
+    m_timelineScroll->setRange(m_timeline->viewTotal(), m_timeline->viewStart(), m_timeline->viewSpan());
     m_browser->refresh();
     syncSequenceTabs();
 }
@@ -839,6 +849,7 @@ void MainWindow::commitEdit()
         m_player->reload(m_project);  // decode threads run on a snapshot; refresh it
     }
     m_timeline->update();
+    m_timelineScroll->setRange(m_timeline->viewTotal(), m_timeline->viewStart(), m_timeline->viewSpan());
     m_browser->refresh();  // the active sequence's duration in the bin may have changed
     // If no video covers the playhead now (e.g. the last clip was deleted), the
     // player emits no frame — clear the stale one so the preview shows black.

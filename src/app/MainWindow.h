@@ -19,6 +19,7 @@ namespace hopline {
 class PreviewWidget;
 class PreviewCache;
 class TimelineWidget;
+class TimelineScrollBar;
 class MediaBrowser;
 class IconButton;
 class AudioMeter;
@@ -91,6 +92,7 @@ private:
     IconButton* m_playButton = nullptr;
     QLabel* m_timeLabel = nullptr;
     TimelineWidget* m_timeline = nullptr;
+    TimelineScrollBar* m_timelineScroll = nullptr;
     QTabBar* m_seqTabs = nullptr;
     std::vector<SequenceId> m_openSequences;
     bool m_syncingTabs = false;

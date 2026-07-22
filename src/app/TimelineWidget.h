@@ -43,8 +43,15 @@ public:
 
     void zoomToFit();
 
+    // Horizontal view state, in seconds, for the timeline scroll/zoom bar.
+    double viewStart() const;   // left edge (m_scrollSeconds)
+    double viewSpan() const;    // visible span
+    double viewTotal() const;   // total scrollable extent
+    void setView(double start, double span);
+
 signals:
     void playheadDragged(Tick time);
+    void viewChanged();  // scroll or zoom changed (for the scroll bar to track)
     void selectionChanged(ClipId clip);
     void clipMoved(std::size_t fromTrack, ClipId clip, int levelDelta, Tick newStart);
     void clipTrimmed(std::size_t trackIndex, ClipId clip, bool trimHead, Tick delta);
@@ -63,13 +70,14 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void contextMenuEvent(QContextMenuEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
     void dragLeaveEvent(QDragLeaveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
 
 private:
-    enum class Drag { None, Scrub, Move, TrimHead, TrimTail };
+    enum class Drag { None, Scrub, Move, TrimHead, TrimTail, Pan };
 
     struct Hit {
         bool onRuler = false;
@@ -90,6 +98,7 @@ private:
 
     int xForTick(Tick time) const;
     Tick tickForX(int x) const;
+    double minPixelsPerSecond() const;  // zoom-out floor: fit the whole timeline
     int trackTop(std::size_t index) const;
     int trackAtY(int y) const;  // sequence track index under y, or -1
     // Level = a track's position among same-kind tracks (0 = V1/A1). These map a
@@ -138,6 +147,8 @@ private:
     int m_dragLevelDelta = 0;  // vertical track-levels the move drag has crossed
     int m_pressX = 0;
     bool m_dragMoved = false;
+    int m_panStartX = 0;          // middle-mouse pan anchor
+    double m_panStartScroll = 0.0;
 
     int m_lastPlayheadX = -1;  // repaint only when the playhead crosses a pixel
 
