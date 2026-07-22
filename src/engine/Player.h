@@ -50,6 +50,7 @@ public:
     bool isOpen() const { return m_open; }
     bool isPlaying() const;
     bool hasAudio() const { return m_audioOut.isOpen(); }
+    float audioPeak(int channel) const { return m_audioOut.peak(channel); }
     bool atEnd() const;
     double position() const;
     double duration() const { return secondsFromTicks(m_seq.duration()); }

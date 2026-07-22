@@ -97,7 +97,7 @@ void IconButton::paintEvent(QPaintEvent*)
     if (fill.alpha() > 0) {
         painter.setPen(Qt::NoPen);
         painter.setBrush(fill);
-        painter.drawRoundedRect(rect(), 7, 7);
+        painter.drawRoundedRect(rect(), 6, 6);
     }
 
     QRectF box(0, 0, kGlyphExtent, kGlyphExtent);

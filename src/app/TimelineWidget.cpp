@@ -35,13 +35,15 @@ constexpr int kTrackGap = 2;
 constexpr int kTrimHandlePx = 6;
 constexpr int kDragThresholdPx = 3;
 
-const QColor kBackground(26, 26, 26);
-const QColor kRulerBackground(34, 34, 34);
-const QColor kHeaderBackground(30, 30, 30);
-const QColor kLaneVideo(38, 38, 42);
-const QColor kLaneAudio(36, 40, 38);
-const QColor kGridLine(58, 58, 58);
-const QColor kText(170, 170, 170);
+// Neutral shades matching the app palette; the track area is a darker "well" than
+// the surrounding panels, and the lanes carry no blue/green tint.
+const QColor kBackground(16, 17, 19);       // timeline canvas — darker than panels
+const QColor kRulerBackground(32, 33, 36);  // ruler chrome
+const QColor kHeaderBackground(24, 25, 27);  // track-name column (panel shade)
+const QColor kLaneVideo(22, 23, 25);        // track row, neutral
+const QColor kLaneAudio(22, 23, 25);        // same — no green tint
+const QColor kGridLine(44, 45, 49);
+const QColor kText(165, 166, 170);
 const QColor kClipVideo(58, 106, 150);
 const QColor kClipAudio(58, 140, 104);
 const QColor kSelected(240, 200, 90);
@@ -138,7 +140,13 @@ Tick TimelineWidget::tickForX(int x) const
 
 int TimelineWidget::trackTop(std::size_t index) const
 {
-    return kRulerHeight + kTrackGap + static_cast<int>(index) * (kTrackHeight + kTrackGap);
+    // Center the track block vertically in the area below the ruler, so it grows
+    // from the middle as more tracks are added.
+    const int count = m_project ? static_cast<int>(m_project->sequence().trackCount()) : 0;
+    const int block = count > 0 ? count * kTrackHeight + (count - 1) * kTrackGap : 0;
+    const int avail = height() - kRulerHeight;
+    const int offset = kRulerHeight + std::max(kTrackGap, (avail - block) / 2);
+    return offset + static_cast<int>(index) * (kTrackHeight + kTrackGap);
 }
 
 TimelineWidget::Hit TimelineWidget::hitTest(const QPoint& pos) const

@@ -19,17 +19,23 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include "app/AudioMeter.h"
 #include "app/IconButton.h"
 #include "app/MediaBrowser.h"
 #include "app/PreviewCache.h"
 #include "app/PreviewWidget.h"
 #include "app/TimelineWidget.h"
+#include "app/ToolboxWidget.h"
 #include "media/MediaProbe.h"
 #include "model/Commands.h"
 #include "model/ProjectIO.h"
 
 namespace hopline {
 namespace {
+
+// Bump when the dock set or default arrangement changes, so a stale saved layout
+// is discarded.
+constexpr int kLayoutVersion = 5;
 
 // Transport time readout: M:SS.CC.
 QString formatClock(double seconds)
@@ -204,6 +210,22 @@ MainWindow::MainWindow(QWidget* parent)
     m_logDock->setObjectName("mediaInfoDock");
     m_logDock->setWidget(m_log);
 
+    m_meter = new AudioMeter(this);
+    m_meterDock = new QDockWidget("Levels", this);
+    m_meterDock->setObjectName("levelsDock");
+    m_meterDock->setWidget(m_meter);
+
+    m_toolbox = new ToolboxWidget(this);
+    m_toolsDock = new QDockWidget("Tools", this);
+    m_toolsDock->setObjectName("toolsDock");
+    m_toolsDock->setWidget(m_toolbox);
+    // The tool strip is narrow; blank the title text and drop the title buttons so
+    // the title bar doesn't force the dock wider than the icons. It keeps a standard
+    // (draggable, non-clipping) title bar — just with nothing that reserves width.
+    m_toolsDock->setWindowTitle(QString());
+    m_toolsDock->toggleViewAction()->setText("Tools");  // keep the Window-menu label
+    m_toolsDock->setFeatures(QDockWidget::DockWidgetMovable);
+
     applyDefaultLayout();
 
     auto* fileMenu = menuBar()->addMenu("&File");
@@ -234,8 +256,10 @@ MainWindow::MainWindow(QWidget* parent)
     windowMenu->addSeparator();
     // Checkable toggles for each panel.
     windowMenu->addAction(m_browserDock->toggleViewAction());
+    windowMenu->addAction(m_toolsDock->toggleViewAction());
     windowMenu->addAction(m_timelineDock->toggleViewAction());
     windowMenu->addAction(m_logDock->toggleViewAction());
+    windowMenu->addAction(m_meterDock->toggleViewAction());
 
     // Poll well above frame rate; the clock decides what's actually due.
     m_timer = new QTimer(this);
@@ -251,30 +275,41 @@ MainWindow::~MainWindow() = default;
 
 void MainWindow::applyDefaultLayout()
 {
-    addDockWidget(Qt::BottomDockWidgetArea, m_browserDock);
-    addDockWidget(Qt::BottomDockWidgetArea, m_timelineDock);
-    addDockWidget(Qt::RightDockWidgetArea, m_logDock);
-    // Media bin sits to the left of the timeline in the bottom area.
-    splitDockWidget(m_browserDock, m_timelineDock, Qt::Horizontal);
+    // The bottom row owns the bottom-right corner, so the Levels meter can sit
+    // right of the timeline while Media Info stays in the top-right only.
+    setCorner(Qt::BottomRightCorner, Qt::BottomDockWidgetArea);
 
-    for (QDockWidget* dock : { m_browserDock, m_timelineDock, m_logDock }) {
+    addDockWidget(Qt::BottomDockWidgetArea, m_browserDock);
+    addDockWidget(Qt::BottomDockWidgetArea, m_toolsDock);
+    addDockWidget(Qt::BottomDockWidgetArea, m_timelineDock);
+    addDockWidget(Qt::BottomDockWidgetArea, m_meterDock);
+    addDockWidget(Qt::RightDockWidgetArea, m_logDock);
+    // Bottom area, left to right: media bin | tools | timeline | Levels meter.
+    splitDockWidget(m_browserDock, m_toolsDock, Qt::Horizontal);
+    splitDockWidget(m_toolsDock, m_timelineDock, Qt::Horizontal);
+    splitDockWidget(m_timelineDock, m_meterDock, Qt::Horizontal);
+
+    for (QDockWidget* dock : { m_browserDock, m_toolsDock, m_timelineDock, m_logDock, m_meterDock }) {
         dock->setFloating(false);
         dock->show();
     }
 
     const int w = width() > 100 ? width() : 1600;
-    resizeDocks({ m_browserDock, m_timelineDock }, { 320, w - 320 }, Qt::Horizontal);
+    resizeDocks({ m_browserDock, m_toolsDock, m_timelineDock, m_meterDock }, { 300, 42, w - 412, 70 },
+                Qt::Horizontal);
     resizeDocks({ m_browserDock, m_timelineDock }, { 360, 360 }, Qt::Vertical);  // taller timeline
 }
 
 void MainWindow::showEvent(QShowEvent* event)
 {
     QMainWindow::showEvent(event);
-    // Apply the user's saved layout once, over the programmatic default.
+    // Apply the user's saved layout once, over the programmatic default. Only when
+    // the saved layout matches the current dock set (kLayoutVersion) — otherwise a
+    // stale state wouldn't include a newly added dock and would hide it.
     if (!m_layoutRestored) {
         m_layoutRestored = true;
         QSettings settings;
-        if (settings.contains("windowState")) {
+        if (settings.value("layoutVersion").toInt() == kLayoutVersion && settings.contains("windowState")) {
             restoreGeometry(settings.value("geometry").toByteArray());
             restoreState(settings.value("windowState").toByteArray());
         }
@@ -286,6 +321,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     QSettings settings;
     settings.setValue("geometry", saveGeometry());
     settings.setValue("windowState", saveState());
+    settings.setValue("layoutVersion", kLayoutVersion);
     QMainWindow::closeEvent(event);
 }
 
@@ -689,6 +725,12 @@ void MainWindow::tick()
     m_playButton->setGlyph(playing ? IconButton::Glyph::Pause : IconButton::Glyph::Play);
     m_timeLabel->setText(QString("%1 / %2").arg(formatClock(m_player->position()), formatClock(m_player->duration())));
     m_wasPlaying = playing;
+
+    if (m_player->hasAudio()) {
+        m_meter->setLevels(m_player->audioPeak(0), m_player->audioPeak(1));
+    } else {
+        m_meter->setLevels(0.0f, 0.0f);
+    }
 }
 
 }  // namespace hopline

@@ -138,6 +138,26 @@ QPixmap folderPixmap(int size, const QColor& color = kFolderGray)
     return pm;
 }
 
+// View-toggle glyphs: three stacked bars for list, a single square for icons.
+QPixmap viewGlyph(bool list)
+{
+    constexpr int s = 16;
+    QPixmap pm(s, s);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    p.setPen(Qt::NoPen);
+    p.setBrush(QColor(210, 212, 218));
+    if (list) {
+        for (int i = 0; i < 3; ++i) p.drawRoundedRect(QRectF(2, 2.5 + i * 4.5, 12, 2.6), 1, 1);
+    } else {
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(QColor(210, 212, 218), 2));
+        p.drawRoundedRect(QRectF(3, 3, 10, 10), 2, 2);
+    }
+    return pm;
+}
+
 void drawBadge(QPainter& p, const QRect& thumb, const QString& text, bool rightAlign)
 {
     if (text.isEmpty()) return;
@@ -212,12 +232,14 @@ public:
 
         const QRect r = option.rect;
         const bool selected = option.state & QStyle::State_Selected;
+        const bool hovered = option.state & QStyle::State_MouseOver;
         const int type = index.data(kTypeRole).toInt();
 
-        if (selected) {
-            painter->setPen(QPen(QColor(255, 255, 255, 40), 1));
-            painter->setBrush(QColor(255, 255, 255, 22));  // neutral gray, not blue
-            painter->drawRoundedRect(QRectF(r).adjusted(1.5, 1.5, -1.5, -1.5), 8, 8);
+        // Same full-fill highlight as every button — no separate edge color.
+        if (selected || hovered) {
+            painter->setPen(Qt::NoPen);
+            painter->setBrush(QColor(255, 255, 255, selected ? 40 : 28));
+            painter->drawRoundedRect(QRectF(r).adjusted(2, 2, -2, -2), 6, 6);
         }
 
         const QRect thumb = thumbRect(r);
@@ -679,22 +701,17 @@ MediaBrowser::MediaBrowser(QWidget* parent)
     connect(m_sizeSlider, &QSlider::valueChanged, this, &MediaBrowser::setThumbSize);
 
     m_viewButton = new QToolButton(this);
-    m_viewButton->setText("List");
     m_viewButton->setToolTip("Toggle icon / list view");
     m_viewButton->setAutoRaise(true);
+    m_viewButton->setIconSize(QSize(16, 16));
     connect(m_viewButton, &QToolButton::clicked, this, [this] { setIconMode(!m_iconMode); });
 
-    // Row 1: breadcrumb navigation (its own line, so it can't squish the search).
+    // Top row: breadcrumb navigation only (the filter lives in the bottom bar).
     auto* navBar = new QHBoxLayout;
-    navBar->setContentsMargins(6, 4, 6, 2);
+    navBar->setContentsMargins(6, 4, 6, 4);
     navBar->setSpacing(4);
     navBar->addWidget(m_upButton);
     navBar->addWidget(m_breadcrumb, 1);
-
-    // Row 2: full-width search/filter.
-    auto* searchBar = new QHBoxLayout;
-    searchBar->setContentsMargins(6, 0, 6, 4);
-    searchBar->addWidget(m_filter);
 
     m_iconView = new IconView(this);
     m_delegate = new TileDelegate(this);
@@ -742,21 +759,20 @@ MediaBrowser::MediaBrowser(QWidget* parent)
     bottomBar->addWidget(m_viewButton);
     bottomBar->addWidget(m_sortButton);
     bottomBar->addWidget(m_sizeSlider);
-    bottomBar->addStretch(1);
+    bottomBar->addWidget(m_filter, 1);  // filter fills the middle
     bottomBar->addWidget(newBin);
 
     auto* topLine = new QFrame(this);
     topLine->setFrameShape(QFrame::HLine);
-    topLine->setStyleSheet("color: #3a3c42;");
+    topLine->setStyleSheet("color: #2c2d31;");
     auto* bottomLine = new QFrame(this);
     bottomLine->setFrameShape(QFrame::HLine);
-    bottomLine->setStyleSheet("color: #3a3c42;");
+    bottomLine->setStyleSheet("color: #2c2d31;");
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
     layout->addLayout(navBar);
-    layout->addLayout(searchBar);
     layout->addWidget(topLine);
     layout->addWidget(m_stack);
     layout->addWidget(bottomLine);
@@ -796,7 +812,7 @@ void MediaBrowser::setIconMode(bool icon)
 {
     m_iconMode = icon;
     m_stack->setCurrentWidget(icon ? static_cast<QWidget*>(m_iconView) : m_listView);
-    m_viewButton->setText(icon ? "List" : "Icons");
+    m_viewButton->setIcon(QIcon(viewGlyph(icon)));  // glyph for the mode you'd switch to
     m_sizeSlider->setVisible(icon);
     m_sortButton->setVisible(icon);  // list view sorts via its headers
     refresh();

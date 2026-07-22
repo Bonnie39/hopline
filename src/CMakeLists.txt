@@ -2,6 +2,8 @@ qt_add_executable(hopline
     main.cpp
     app/MainWindow.cpp
     app/MainWindow.h
+    app/AudioMeter.cpp
+    app/AudioMeter.h
     app/IconButton.cpp
     app/IconButton.h
     app/MediaBrowser.cpp
@@ -12,6 +14,8 @@ qt_add_executable(hopline
     app/PreviewWidget.h
     app/TimelineWidget.cpp
     app/TimelineWidget.h
+    app/ToolboxWidget.cpp
+    app/ToolboxWidget.h
     engine/AudioOutput.cpp
     engine/AudioOutput.h
     engine/Clock.h

@@ -19,6 +19,8 @@ class PreviewCache;
 class TimelineWidget;
 class MediaBrowser;
 class IconButton;
+class AudioMeter;
+class ToolboxWidget;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -76,9 +78,13 @@ private:
     QLabel* m_timeLabel = nullptr;
     TimelineWidget* m_timeline = nullptr;
     MediaBrowser* m_browser = nullptr;
+    AudioMeter* m_meter = nullptr;
+    ToolboxWidget* m_toolbox = nullptr;
     QDockWidget* m_browserDock = nullptr;
     QDockWidget* m_timelineDock = nullptr;
     QDockWidget* m_logDock = nullptr;
+    QDockWidget* m_meterDock = nullptr;
+    QDockWidget* m_toolsDock = nullptr;
     std::unique_ptr<Player> m_player;
     std::unique_ptr<PreviewCache> m_previews;
     Project m_project;

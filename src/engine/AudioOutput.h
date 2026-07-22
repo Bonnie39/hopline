@@ -45,6 +45,12 @@ public:
     int channels() const { return m_channels; }
     int underruns() const { return m_underruns; }
 
+    // Most recent per-channel peak (0..1 linear), for the UI level meter.
+    float peak(int channel) const
+    {
+        return m_peak[channel <= 0 ? 0 : 1].load(std::memory_order_relaxed);
+    }
+
 private:
     struct Device;
     friend struct AudioCallback;
@@ -59,6 +65,7 @@ private:
     std::atomic<int> m_underruns{ 0 };
     std::atomic<bool> m_paused{ true };
     std::atomic<bool> m_endOfStream{ false };
+    std::atomic<float> m_peak[2]{};
 
     int m_sampleRate = 0;
     int m_channels = 0;

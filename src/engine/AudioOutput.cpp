@@ -11,6 +11,7 @@
 #include <miniaudio.h>
 
 #include <algorithm>
+#include <cmath>
 
 namespace hopline {
 
@@ -30,6 +31,8 @@ void AudioOutput::fill(float* dst, uint32_t frameCount)
     // resuming picks up exactly where it left off.
     if (m_paused.load(std::memory_order_acquire)) {
         std::fill(dst, dst + wanted, 0.0f);
+        m_peak[0].store(0.0f, std::memory_order_relaxed);
+        m_peak[1].store(0.0f, std::memory_order_relaxed);
         return;
     }
 
@@ -40,6 +43,19 @@ void AudioOutput::fill(float* dst, uint32_t frameCount)
             m_underruns.fetch_add(1, std::memory_order_relaxed);
         }
     }
+
+    // Peak level per channel over this buffer, for the UI meter.
+    float p0 = 0.0f, p1 = 0.0f;
+    for (uint32_t f = 0; f < frameCount; ++f) {
+        const float a = std::fabs(dst[static_cast<size_t>(f) * m_channels]);
+        if (a > p0) p0 = a;
+        if (m_channels > 1) {
+            const float b = std::fabs(dst[static_cast<size_t>(f) * m_channels + 1]);
+            if (b > p1) p1 = b;
+        }
+    }
+    m_peak[0].store(p0, std::memory_order_relaxed);
+    m_peak[1].store(m_channels > 1 ? p1 : p0, std::memory_order_relaxed);
 
     // Silence from a genuine underrun still counts: the clock must track real
     // time, or a glitch would stall it and let video run away.
