@@ -59,7 +59,6 @@ const QColor kClipVideo(58, 106, 150);
 const QColor kClipAudio(58, 140, 104);
 const QColor kSelected(240, 200, 90);
 const QColor kGhost(150, 150, 150);
-const QColor kWaveform(150, 225, 190);
 const QColor kPlayhead(235, 80, 80);
 
 double niceInterval(double pixelsPerSecond)
@@ -1368,8 +1367,9 @@ void TimelineWidget::drawWaveform(QPainter& painter, const Clip& clip, const QRe
 
     const MediaSource* wm = m_project->media(clip.source);
     const bool audioOnly = wm && !wm->hasVideo;
-    const QColor col = clip.label > 0 ? labelColor(clip.label).lighter(160)
-                                      : (audioOnly ? kWaveform : kClipVideo.lighter(160));
+    const QColor base = clip.label > 0 ? labelColor(clip.label)
+                                       : (audioOnly ? kClipAudio : kClipVideo);
+    const QColor col = base.lighter(160);
     auto peakAt = [&](int x, const std::vector<float>& ch) -> float {
         const double fraction = std::clamp((x - x0 + 0.5) / fullWidth, 0.0, 1.0);
         const double srcSec = srcStart + fraction * srcSpan;
