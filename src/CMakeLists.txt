@@ -12,6 +12,8 @@ qt_add_executable(hopline
     app/PreviewCache.h
     app/PreviewWidget.cpp
     app/PreviewWidget.h
+    app/SequenceDialog.cpp
+    app/SequenceDialog.h
     app/TimelineWidget.cpp
     app/TimelineWidget.h
     app/ToolboxWidget.cpp

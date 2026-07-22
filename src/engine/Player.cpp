@@ -322,7 +322,10 @@ void Player::togglePlay()
 
 void Player::restartAt(Tick target, bool resumePlaying)
 {
-    target = std::clamp<Tick>(target, 0, m_seq.duration());
+    // Clamp to content only when there is content; an empty sequence still lets the
+    // playhead move freely (over black) so the user can position it.
+    const Tick dur = m_seq.duration();
+    target = dur > 0 ? std::clamp<Tick>(target, 0, dur) : std::max<Tick>(0, target);
 
     m_startTick = target;
     m_curVideoSource = kInvalidMedia;  // force a re-seek on both decoders

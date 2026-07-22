@@ -287,8 +287,12 @@ void TimelineWidget::scrubTo(int x)
     Tick time = tickForX(x);
     if (m_project) {
         time = m_project->sequence().snapToFrame(time);
-        time = std::min(time, m_project->sequence().duration());
+        const Tick dur = m_project->sequence().duration();
+        if (dur > 0) {
+            time = std::min(time, dur);  // don't scrub past content when there is any
+        }
     }
+    time = std::max<Tick>(0, time);
     setPlayhead(time);
     emit playheadDragged(m_playhead);
 }
@@ -804,6 +808,17 @@ void TimelineWidget::paintEvent(QPaintEvent*)
 {
     QPainter painter(this);
     painter.fillRect(rect(), kBackground);
+
+    if (!m_project || !m_project->hasActiveSequence()) {
+        painter.setPen(QColor(110, 112, 118));
+        QFont f = painter.font();
+        f.setPixelSize(13);
+        painter.setFont(f);
+        painter.drawText(rect(), Qt::AlignCenter,
+                         "No active sequence\n\nDrag a clip here, or create one with File ▸ New Sequence");
+        return;
+    }
+
     drawTracks(painter);
     drawDropGhost(painter);
     drawRuler(painter);

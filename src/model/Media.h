@@ -14,6 +14,10 @@ inline constexpr MediaId kInvalidMedia = 0;
 using FolderId = uint64_t;
 inline constexpr FolderId kRootFolder = 1;
 
+// Sequences (edit timelines) also live in the bin.
+using SequenceId = uint64_t;
+inline constexpr SequenceId kInvalidSequence = 0;
+
 struct BinFolder {
     FolderId id = 0;
     FolderId parent = 0;  // 0 for the root

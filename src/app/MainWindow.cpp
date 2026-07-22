@@ -1,5 +1,7 @@
 #include "app/MainWindow.h"
 
+#include <algorithm>
+
 #include <QCloseEvent>
 #include <QDockWidget>
 #include <QFileDialog>
@@ -16,6 +18,7 @@
 #include <QShowEvent>
 #include <QStatusBar>
 #include <QStyle>
+#include <QTabBar>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -24,6 +27,7 @@
 #include "app/MediaBrowser.h"
 #include "app/PreviewCache.h"
 #include "app/PreviewWidget.h"
+#include "app/SequenceDialog.h"
 #include "app/TimelineWidget.h"
 #include "app/ToolboxWidget.h"
 #include "media/MediaProbe.h"
@@ -163,9 +167,32 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_timeline, &TimelineWidget::mediaDropped, this, &MainWindow::onMediaDropped);
     connect(m_timeline, &TimelineWidget::fileDropped, this, &MainWindow::onFileDropped);
+
+    // Sequence tab strip above the timeline — one tab per open sequence.
+    m_seqTabs = new QTabBar(this);
+    m_seqTabs->setExpanding(false);
+    m_seqTabs->setTabsClosable(true);
+    m_seqTabs->setDrawBase(false);
+    m_seqTabs->setElideMode(Qt::ElideRight);
+    m_seqTabs->setUsesScrollButtons(true);
+    m_seqTabs->setVisible(false);  // shown once a sequence is open
+    connect(m_seqTabs, &QTabBar::currentChanged, this, [this](int index) {
+        if (m_syncingTabs || index < 0) return;
+        const auto id = static_cast<SequenceId>(m_seqTabs->tabData(index).toULongLong());
+        if (id != m_project.activeSequenceId()) onSequenceActivated(id);
+    });
+    connect(m_seqTabs, &QTabBar::tabCloseRequested, this, &MainWindow::closeSequenceTab);
+
+    auto* timelinePanel = new QWidget(this);
+    auto* timelineLayout = new QVBoxLayout(timelinePanel);
+    timelineLayout->setContentsMargins(0, 0, 0, 0);
+    timelineLayout->setSpacing(0);
+    timelineLayout->addWidget(m_seqTabs);
+    timelineLayout->addWidget(m_timeline, 1);
+
     m_timelineDock = new QDockWidget("Timeline", this);
     m_timelineDock->setObjectName("timelineDock");
-    m_timelineDock->setWidget(m_timeline);
+    m_timelineDock->setWidget(timelinePanel);
 
     m_browser = new MediaBrowser(this);
     m_browser->setPreviewCache(m_previews.get());
@@ -199,6 +226,14 @@ MainWindow::MainWindow(QWidget* parent)
         m_project.renameFolder(folder, name.toStdString());
         m_browser->refresh();
     });
+    connect(m_browser, &MediaBrowser::newSequenceRequested, this, &MainWindow::onNewSequence);
+    connect(m_browser, &MediaBrowser::sequenceActivated, this, &MainWindow::onSequenceActivated);
+    connect(m_browser, &MediaBrowser::sequenceRenamed, this, [this](SequenceId id, const QString& name) {
+        m_project.renameSequence(id, name.toStdString());
+        m_browser->refresh();
+        syncSequenceTabs();
+    });
+    connect(m_browser, &MediaBrowser::deleteSequenceRequested, this, &MainWindow::onDeleteSequence);
     connect(m_browser, &MediaBrowser::mediaSelected, this, &MainWindow::showMediaInfo);
     m_browserDock = new QDockWidget("Media", this);
     m_browserDock->setObjectName("mediaDock");
@@ -230,6 +265,8 @@ MainWindow::MainWindow(QWidget* parent)
 
     auto* fileMenu = menuBar()->addMenu("&File");
     fileMenu->addAction("&New Project", QKeySequence::New, this, &MainWindow::newProject);
+    fileMenu->addAction("New &Sequence…", QKeySequence("Ctrl+Shift+N"), this,
+                        [this] { onNewSequence(m_browser->currentFolder()); });
     fileMenu->addAction("&Open Project…", QKeySequence::Open, this, &MainWindow::openProject);
     fileMenu->addAction("&Save Project", QKeySequence::Save, this, &MainWindow::saveProject);
     fileMenu->addAction("Save Project &As…", QKeySequence::SaveAs, this, &MainWindow::saveProjectAs);
@@ -343,6 +380,10 @@ void MainWindow::showMediaInfo(MediaId media)
 
 void MainWindow::reopenPlayer()
 {
+    if (!m_project.hasActiveSequence()) {
+        m_player.reset();  // nothing to play until a sequence is active
+        return;
+    }
     m_player = std::make_unique<Player>();
     std::string error;
     m_player->open(m_project, error);
@@ -356,6 +397,105 @@ void MainWindow::refreshPreviewsForProject()
     }
 }
 
+void MainWindow::activateSequence(SequenceId sequence)
+{
+    m_project.setActiveSequence(sequence);
+    // Opening a sequence adds it to the timeline's tab strip.
+    if (sequence != kInvalidSequence
+        && std::find(m_openSequences.begin(), m_openSequences.end(), sequence) == m_openSequences.end()) {
+        m_openSequences.push_back(sequence);
+    }
+    reopenPlayer();
+    if (const Sequence* s = m_project.activeSequence()) {
+        m_preview->setCanvas(s->width(), s->height());
+    } else {
+        m_preview->setCanvas(0, 0);
+    }
+    m_preview->clear();  // show the black canvas until the player supplies a frame
+    m_timeline->clearSelection();
+    m_timeline->setPlayhead(0);
+    m_timeline->update();
+    m_browser->refresh();
+    syncSequenceTabs();
+}
+
+SequenceId MainWindow::ensureActiveSequence(const MediaSource& source)
+{
+    if (m_project.hasActiveSequence()) {
+        return m_project.activeSequenceId();
+    }
+    // Auto-create a sequence matching the dropped media (Premiere-style).
+    const int rn = source.rateNum > 0 ? source.rateNum : 30;
+    const int rd = source.rateDen > 0 ? source.rateDen : 1;
+    const int w = source.width > 0 ? source.width : 1920;
+    const int h = source.height > 0 ? source.height : 1080;
+    const SequenceId id = m_project.addSequence("Sequence 1", rn, rd, w, h, kRootFolder);
+    activateSequence(id);
+    return id;
+}
+
+void MainWindow::onNewSequence(FolderId folder)
+{
+    SequenceDialog dialog(QString("Sequence %1").arg(m_project.sequences().size() + 1), this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    const SequenceSettings s = dialog.settings();
+    const SequenceId id = m_project.addSequence(s.name.toStdString(), s.rateNum, s.rateDen, s.width, s.height, folder);
+    activateSequence(id);
+    statusBar()->showMessage(QString("Created sequence \"%1\"").arg(s.name));
+}
+
+void MainWindow::onSequenceActivated(SequenceId sequence) { activateSequence(sequence); }
+
+void MainWindow::onDeleteSequence(SequenceId sequence)
+{
+    m_openSequences.erase(std::remove(m_openSequences.begin(), m_openSequences.end(), sequence),
+                          m_openSequences.end());
+    const bool wasActive = m_project.activeSequenceId() == sequence;
+    m_project.removeSequence(sequence);
+    if (wasActive) {
+        // Fall back to another open sequence, if any.
+        activateSequence(m_openSequences.empty() ? m_project.activeSequenceId() : m_openSequences.back());
+    } else {
+        m_browser->refresh();
+        syncSequenceTabs();
+    }
+}
+
+void MainWindow::syncSequenceTabs()
+{
+    m_syncingTabs = true;
+    while (m_seqTabs->count() > 0) {
+        m_seqTabs->removeTab(0);
+    }
+    int activeIndex = -1;
+    for (SequenceId id : m_openSequences) {
+        const Sequence* seq = m_project.sequenceById(id);
+        if (!seq) continue;
+        const int idx = m_seqTabs->addTab(QString::fromStdString(seq->name()));
+        m_seqTabs->setTabData(idx, static_cast<qulonglong>(id));
+        if (id == m_project.activeSequenceId()) activeIndex = idx;
+    }
+    if (activeIndex >= 0) m_seqTabs->setCurrentIndex(activeIndex);
+    m_seqTabs->setVisible(m_seqTabs->count() > 0);
+    m_syncingTabs = false;
+}
+
+void MainWindow::closeSequenceTab(int index)
+{
+    if (index < 0 || index >= m_seqTabs->count()) return;
+    const auto id = static_cast<SequenceId>(m_seqTabs->tabData(index).toULongLong());
+    m_openSequences.erase(std::remove(m_openSequences.begin(), m_openSequences.end(), id),
+                          m_openSequences.end());
+    // Closing the active sequence's tab activates another open one (or clears).
+    if (id == m_project.activeSequenceId()) {
+        activateSequence(m_openSequences.empty() ? kInvalidSequence : m_openSequences.back());
+    } else {
+        syncSequenceTabs();
+    }
+}
+
 MediaId MainWindow::importMedia(const QString& path, FolderId folder)
 {
     std::string error;
@@ -366,22 +506,7 @@ MediaId MainWindow::importMedia(const QString& path, FolderId folder)
     }
 
     const MediaSource source = toMediaSource(*info);
-    const bool firstMedia = m_project.mediaPool().empty();
     const MediaId id = m_project.addMedia(source, folder);
-
-    // The first import sets the sequence format.
-    if (firstMedia) {
-        if (source.rateNum > 0) {
-            m_project.sequence().setFrameRate(source.rateNum, source.rateDen);
-        }
-        if (source.width > 0) {
-            m_project.sequence().setResolution(source.width, source.height);
-        }
-    }
-
-    if (!m_player) {
-        reopenPlayer();
-    }
     m_previews->request(id, path, source.hasVideo, source.hasAudio, source.width, source.height);
     m_browser->refresh();
     return id;
@@ -390,7 +515,11 @@ MediaId MainWindow::importMedia(const QString& path, FolderId folder)
 void MainWindow::placeMedia(MediaId media, Tick start)
 {
     const MediaSource* source = m_project.media(media);
-    if (!source || m_project.sequence().trackCount() < 2) {
+    if (!source) {
+        return;
+    }
+    ensureActiveSequence(*source);  // make (and open) a sequence if the project has none
+    if (m_project.sequence().trackCount() < 2) {
         return;
     }
 
@@ -438,10 +567,14 @@ void MainWindow::newProject()
     m_previews->clear();
     m_player.reset();
     m_projectPath.clear();
+    m_openSequences.clear();
+    m_preview->setCanvas(0, 0);
+    m_preview->clear();
     m_browser->setProject(&m_project);  // resets navigation to the root folder
     m_timeline->clearSelection();
     m_timeline->setPlayhead(0);
     m_timeline->update();
+    syncSequenceTabs();
     statusBar()->showMessage("New project");
 }
 
@@ -465,10 +598,19 @@ void MainWindow::openProject()
     m_projectPath = path;
     m_previews->clear();
     refreshPreviewsForProject();
-    reopenPlayer();
     m_browser->setProject(&m_project);  // resets navigation to the root folder
-    m_timeline->clearSelection();
-    m_timeline->setPlayhead(0);
+    m_openSequences.clear();
+    if (m_project.hasActiveSequence()) {
+        activateSequence(m_project.activeSequenceId());  // opens its tab, canvas, player, timeline
+    } else {
+        m_preview->setCanvas(0, 0);
+        m_preview->clear();
+        reopenPlayer();
+        m_timeline->clearSelection();
+        m_timeline->setPlayhead(0);
+        m_timeline->update();
+        syncSequenceTabs();
+    }
     m_timeline->zoomToFit();
     statusBar()->showMessage(QString("Opened %1").arg(path));
 }
@@ -573,6 +715,11 @@ void MainWindow::timelineScrubbed(Tick time)
     if (m_player) {
         m_player->seek(secondsFromTicks(time));
     }
+    // Scrubbing into empty space (no video at `time`) shows black, not a stale frame.
+    const Sequence* s = m_project.activeSequence();
+    if (!s || !s->topVideoClipAt(time)) {
+        m_preview->clear();
+    }
 }
 
 namespace {
@@ -595,6 +742,13 @@ void MainWindow::commitEdit()
         m_player->reload(m_project);  // decode threads run on a snapshot; refresh it
     }
     m_timeline->update();
+    m_browser->refresh();  // the active sequence's duration in the bin may have changed
+    // If no video covers the playhead now (e.g. the last clip was deleted), the
+    // player emits no frame — clear the stale one so the preview shows black.
+    const Sequence* s = m_project.activeSequence();
+    if (!s || !s->topVideoClipAt(m_timeline->playhead())) {
+        m_preview->clear();
+    }
 }
 
 void MainWindow::onClipMoved(std::size_t trackIndex, ClipId clip, Tick newStart)

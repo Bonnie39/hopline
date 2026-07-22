@@ -2,6 +2,7 @@
 
 #include <QMainWindow>
 #include <memory>
+#include <vector>
 
 #include "engine/Player.h"
 #include "model/Command.h"
@@ -11,6 +12,7 @@ class QPlainTextEdit;
 class QLabel;
 class QTimer;
 class QDockWidget;
+class QTabBar;
 
 namespace hopline {
 
@@ -46,6 +48,9 @@ private slots:
     void onNewFolder(FolderId parent);
     void onDeleteFolder(FolderId folder);
     void onDeleteMedia(QList<MediaId> media);
+    void onNewSequence(FolderId folder);
+    void onSequenceActivated(SequenceId sequence);
+    void onDeleteSequence(SequenceId sequence);
     void onMediaDropped(MediaId media, Tick start);
     void onFileDropped(const QString& path, Tick start);
     void togglePlay();
@@ -71,12 +76,19 @@ private:
     MediaId importMedia(const QString& path, FolderId folder);
     void placeMedia(MediaId media, Tick start);
     bool mediaInUse(MediaId id) const;
+    void activateSequence(SequenceId sequence);
+    SequenceId ensureActiveSequence(const MediaSource& source);
+    void syncSequenceTabs();
+    void closeSequenceTab(int index);
     void refreshPreviewsForProject();
 
     QTimer* m_timer = nullptr;
     IconButton* m_playButton = nullptr;
     QLabel* m_timeLabel = nullptr;
     TimelineWidget* m_timeline = nullptr;
+    QTabBar* m_seqTabs = nullptr;
+    std::vector<SequenceId> m_openSequences;
+    bool m_syncingTabs = false;
     MediaBrowser* m_browser = nullptr;
     AudioMeter* m_meter = nullptr;
     ToolboxWidget* m_toolbox = nullptr;

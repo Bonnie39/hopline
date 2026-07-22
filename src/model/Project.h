@@ -34,8 +34,29 @@ public:
     // Removes a folder; its media and subfolders move up to its parent.
     void removeFolder(FolderId id);
 
-    Sequence& sequence() { return m_sequence; }
-    const Sequence& sequence() const { return m_sequence; }
+    // The active sequence drives the timeline and playback. sequence() returns it,
+    // or an empty placeholder when the project has no sequence yet, so command/
+    // playback code can stay reference-based. activeSequence() is nullptr when none.
+    Sequence& sequence();
+    const Sequence& sequence() const;
+    Sequence* activeSequence();
+    const Sequence* activeSequence() const;
+    bool hasActiveSequence() const { return sequenceById(m_activeSequence) != nullptr; }
+    SequenceId activeSequenceId() const { return m_activeSequence; }
+    void setActiveSequence(SequenceId id);
+
+    const std::vector<Sequence>& sequences() const { return m_sequences; }
+    Sequence* sequenceById(SequenceId id);
+    const Sequence* sequenceById(SequenceId id) const;
+    SequenceId addSequence(std::string name, int rateNum, int rateDen, int width, int height,
+                           FolderId folder = kRootFolder);
+    bool renameSequence(SequenceId id, std::string name);
+    void removeSequence(SequenceId id);
+    void setSequenceFolder(SequenceId id, FolderId folder);
+
+    // For deserialization.
+    void restoreSequence(Sequence seq);
+    void reserveSequenceId(SequenceId id);
 
     // Ids are never reused, so undo/redo can round-trip a clip unchanged.
     ClipId nextClipId() { return ++m_lastClipId; }
@@ -56,11 +77,14 @@ public:
 private:
     std::vector<MediaSource> m_media;
     std::vector<BinFolder> m_folders;
-    Sequence m_sequence;
+    std::vector<Sequence> m_sequences;
+    Sequence m_placeholder;  // returned by sequence() when no sequence is active
+    SequenceId m_activeSequence = kInvalidSequence;
     MediaId m_lastMediaId = kInvalidMedia;
     ClipId m_lastClipId = kInvalidClip;
     LinkGroup m_lastLinkGroup = kNoLink;
     FolderId m_lastFolderId = 0;
+    SequenceId m_lastSequenceId = kInvalidSequence;
 };
 
 }  // namespace hopline

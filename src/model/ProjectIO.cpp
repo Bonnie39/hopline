@@ -10,7 +10,7 @@
 namespace hopline {
 namespace {
 
-constexpr int kFormatVersion = 3;
+constexpr int kFormatVersion = 4;
 
 using nlohmann::json;
 
@@ -67,6 +67,51 @@ Clip clipFromJson(const json& j)
     return c;
 }
 
+json sequenceToJson(const Sequence& seq)
+{
+    json jseq;
+    jseq["id"] = seq.id();
+    jseq["name"] = seq.name();
+    jseq["folder"] = seq.folder();
+    jseq["rateNum"] = seq.rateNum();
+    jseq["rateDen"] = seq.rateDen();
+    jseq["width"] = seq.width();
+    jseq["height"] = seq.height();
+    for (size_t i = 0; i < seq.trackCount(); ++i) {
+        const Track& track = seq.track(i);
+        json jtrack;
+        jtrack["kind"] = track.kind() == Track::Kind::Video ? "video" : "audio";
+        jtrack["name"] = track.name();
+        for (const Clip& clip : track.clips()) {
+            jtrack["clips"].push_back(clipToJson(clip));
+        }
+        jseq["tracks"].push_back(std::move(jtrack));
+    }
+    return jseq;
+}
+
+Sequence sequenceFromJson(const json& jseq, Project& out)
+{
+    Sequence seq;
+    seq.clear();  // drop the default V1/A1; rebuild from json
+    seq.setId(jseq.value("id", SequenceId{ 0 }));
+    seq.setName(jseq.value("name", std::string("Sequence")));
+    seq.setFolder(jseq.value("folder", kRootFolder));
+    seq.setFrameRate(jseq.value("rateNum", 30), jseq.value("rateDen", 1));
+    seq.setResolution(jseq.value("width", 1920), jseq.value("height", 1080));
+    for (const json& jt : jseq.value("tracks", json::array())) {
+        const auto kind = jt.value("kind", "video") == "audio" ? Track::Kind::Audio : Track::Kind::Video;
+        const size_t index = seq.addTrack(kind, jt.value("name", std::string("Track")));
+        for (const json& jc : jt.value("clips", json::array())) {
+            const Clip clip = clipFromJson(jc);
+            seq.track(index).insert(clip);
+            out.reserveClipId(clip.id);
+            out.reserveLinkGroup(clip.linkGroup);
+        }
+    }
+    return seq;
+}
+
 }  // namespace
 
 std::string serializeProject(const Project& project)
@@ -82,23 +127,10 @@ std::string serializeProject(const Project& project)
         root["media"].push_back(mediaToJson(media));
     }
 
-    const Sequence& seq = project.sequence();
-    json jseq;
-    jseq["rateNum"] = seq.rateNum();
-    jseq["rateDen"] = seq.rateDen();
-    jseq["width"] = seq.width();
-    jseq["height"] = seq.height();
-    for (size_t i = 0; i < seq.trackCount(); ++i) {
-        const Track& track = seq.track(i);
-        json jtrack;
-        jtrack["kind"] = track.kind() == Track::Kind::Video ? "video" : "audio";
-        jtrack["name"] = track.name();
-        for (const Clip& clip : track.clips()) {
-            jtrack["clips"].push_back(clipToJson(clip));
-        }
-        jseq["tracks"].push_back(std::move(jtrack));
+    for (const Sequence& seq : project.sequences()) {
+        root["sequences"].push_back(sequenceToJson(seq));
     }
-    root["sequence"] = std::move(jseq);
+    root["activeSequence"] = project.activeSequenceId();
 
     return root.dump(2);
 }
@@ -126,20 +158,23 @@ bool deserializeProject(const std::string& text, Project& out, std::string& erro
         out.restoreMedia(mediaFromJson(jm));
     }
 
-    const json& jseq = root.at("sequence");
-    Sequence& seq = out.sequence();
-    seq.setFrameRate(jseq.value("rateNum", 30), jseq.value("rateDen", 1));
-    seq.setResolution(jseq.value("width", 1920), jseq.value("height", 1080));
-
-    for (const json& jt : jseq.value("tracks", json::array())) {
-        const auto kind = jt.value("kind", "video") == "audio" ? Track::Kind::Audio : Track::Kind::Video;
-        const size_t index = seq.addTrack(kind, jt.value("name", std::string("Track")));
-        for (const json& jc : jt.value("clips", json::array())) {
-            const Clip clip = clipFromJson(jc);
-            seq.track(index).insert(clip);
-            out.reserveClipId(clip.id);
-            out.reserveLinkGroup(clip.linkGroup);
+    if (root.contains("sequences")) {
+        for (const json& js : root["sequences"]) {
+            out.restoreSequence(sequenceFromJson(js, out));
         }
+        out.setActiveSequence(root.value("activeSequence", SequenceId{ 0 }));
+    } else if (root.contains("sequence")) {
+        // Backward compat: v1-3 stored a single unnamed sequence.
+        Sequence seq = sequenceFromJson(root["sequence"], out);
+        if (seq.id() == kInvalidSequence) {
+            seq.setId(1);
+        }
+        if (seq.name().empty()) {
+            seq.setName("Sequence 1");
+        }
+        const SequenceId id = seq.id();
+        out.restoreSequence(std::move(seq));
+        out.setActiveSequence(id);
     }
 
     return true;

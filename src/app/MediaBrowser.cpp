@@ -51,6 +51,9 @@ constexpr int kFpsRole = Qt::UserRole + 6;
 
 constexpr int kFolderType = 0;
 constexpr int kMediaType = 1;
+constexpr int kSequenceType = 2;
+
+const QColor kSequenceColor(92, 155, 224);
 
 constexpr int kColName = 0;
 constexpr int kColType = 1;
@@ -126,6 +129,22 @@ void paintFolder(QPainter& p, const QRectF& box, const QColor& color)
     p.drawPath(body);
 }
 
+// A mini-timeline glyph: a frame with two offset track bars.
+void paintSequence(QPainter& p, const QRectF& box, const QColor& color)
+{
+    const double s = std::min(box.width(), box.height()) * 0.5;
+    const QPointF c = box.center();
+    const QRectF f(c.x() - s, c.y() - s * 0.6, 2 * s, 1.2 * s);
+    p.setPen(QPen(color, 2));
+    p.setBrush(Qt::NoBrush);
+    p.drawRoundedRect(f, 3, 3);
+    p.setPen(Qt::NoPen);
+    p.setBrush(color);
+    const double bh = f.height() * 0.16;
+    p.drawRoundedRect(QRectF(f.left() + f.width() * 0.14, f.top() + f.height() * 0.26, f.width() * 0.52, bh), 1, 1);
+    p.drawRoundedRect(QRectF(f.left() + f.width() * 0.26, f.top() + f.height() * 0.58, f.width() * 0.46, bh), 1, 1);
+}
+
 const QColor kFolderGray(150, 152, 158);
 
 QPixmap folderPixmap(int size, const QColor& color = kFolderGray)
@@ -135,6 +154,16 @@ QPixmap folderPixmap(int size, const QColor& color = kFolderGray)
     QPainter p(&pm);
     p.setRenderHint(QPainter::Antialiasing);
     paintFolder(p, QRectF(0, 0, size, size), color);
+    return pm;
+}
+
+QPixmap sequencePixmap(int size)
+{
+    QPixmap pm(size, size);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing);
+    paintSequence(p, QRectF(0, 0, size, size), kSequenceColor);
     return pm;
 }
 
@@ -243,18 +272,28 @@ public:
         }
 
         const QRect thumb = thumbRect(r);
+        const double scrubFrac = hovered ? m_hoverFrac : -1.0;
         if (type == kFolderType) {
             const int lbl = index.data(kLabelRole).toInt();
             paintFolder(*painter, thumb, lbl > 0 ? labelColor(lbl) : kFolderGray);
         } else {
-            QPainterPath clip;
-            clip.addRoundedRect(thumb, 5, 5);
-            painter->setClipPath(clip);
-            drawThumbnail(*painter, thumb, index);
+            QPainterPath clipPath;
+            clipPath.addRoundedRect(thumb, 5, 5);
+            painter->setClipPath(clipPath);
+            bool drawn = true;
+            if (type == kSequenceType) {
+                drawn = drawSequenceThumbnail(*painter, thumb, index, scrubFrac >= 0.0 ? scrubFrac : 0.0);
+            } else {
+                drawThumbnail(*painter, thumb, index, scrubFrac);
+            }
             painter->setClipping(false);
-            painter->setPen(QPen(QColor(255, 255, 255, 20), 1));  // crisp thumbnail frame
-            painter->setBrush(Qt::NoBrush);
-            painter->drawRoundedRect(QRectF(thumb).adjusted(0.5, 0.5, -0.5, -0.5), 5, 5);
+            if (drawn) {
+                painter->setPen(QPen(QColor(255, 255, 255, 20), 1));  // crisp thumbnail frame
+                painter->setBrush(Qt::NoBrush);
+                painter->drawRoundedRect(QRectF(thumb).adjusted(0.5, 0.5, -0.5, -0.5), 5, 5);
+            } else {
+                paintSequence(*painter, thumb, kSequenceColor);  // no clips yet — show the glyph
+            }
         }
 
         // Label stripe across the top of the thumbnail.
@@ -269,11 +308,13 @@ public:
             drawBadge(*painter, thumb, typeText(index.data(kVideoRole).toBool(),
                                                 index.data(kAudioRole).toBool()),
                       /*rightAlign*/ false);
+        }
+        if (type == kMediaType || type == kSequenceType) {
             drawBadge(*painter, thumb, shortDuration(index.data(kDurationRole).toLongLong()),
                       /*rightAlign*/ true);
 
             // Hover-scrub progress line.
-            if (index.data(kIdRole).toULongLong() == m_hoverId && m_hoverFrac >= 0.0) {
+            if (hovered && m_hoverFrac >= 0.0) {
                 const int x = thumb.left() + static_cast<int>(m_hoverFrac * thumb.width());
                 painter->setPen(QPen(QColor(255, 255, 255, 200), 2));
                 painter->drawLine(x, thumb.bottom() - 2, x, thumb.bottom());
@@ -294,7 +335,16 @@ public:
     }
 
 private:
-    void drawThumbnail(QPainter& p, const QRect& box, const QModelIndex& index) const
+    static void drawImageFit(QPainter& p, const QRect& box, const QImage& img)
+    {
+        p.fillRect(box, QColor(20, 21, 23));
+        const QSize scaled = img.size().scaled(box.size(), Qt::KeepAspectRatio);
+        const QRect dst(box.left() + (box.width() - scaled.width()) / 2,
+                        box.top() + (box.height() - scaled.height()) / 2, scaled.width(), scaled.height());
+        p.drawImage(dst, img);
+    }
+
+    void drawThumbnail(QPainter& p, const QRect& box, const QModelIndex& index, double scrubFrac) const
     {
         const MediaId id = index.data(kIdRole).toULongLong();
         const PreviewCache::Thumbnails* thumbs = m_owner->previews() ? m_owner->previews()->thumbnails(id) : nullptr;
@@ -309,15 +359,61 @@ private:
         }
         const int n = static_cast<int>(thumbs->images.size());
         int idx = 0;
-        if (id == m_hoverId && n > 1 && m_hoverFrac >= 0.0) {
-            idx = std::clamp(static_cast<int>(std::lround(m_hoverFrac * (n - 1))), 0, n - 1);
+        if (scrubFrac >= 0.0 && n > 1) {
+            idx = std::clamp(static_cast<int>(std::lround(scrubFrac * (n - 1))), 0, n - 1);
         }
-        p.fillRect(box, QColor(20, 21, 23));
+        drawImageFit(p, box, thumbs->images[idx]);
+    }
+
+    // Loose sequence scrub, composited like the preview pane: a black frame of the
+    // sequence aspect with the top clip's cached thumbnail drawn at its actual size
+    // relative to the sequence canvas. Returns false if there is nothing to show.
+    bool drawSequenceThumbnail(QPainter& p, const QRect& box, const QModelIndex& index, double frac) const
+    {
+        const Project* proj = m_owner->project();
+        const auto sid = static_cast<SequenceId>(index.data(kIdRole).toULongLong());
+        const Sequence* seq = proj ? proj->sequenceById(sid) : nullptr;
+        if (!seq || seq->duration() <= 0 || seq->width() <= 0 || seq->height() <= 0 || !m_owner->previews()) {
+            return false;
+        }
+        const Tick t = static_cast<Tick>(std::llround(std::clamp(frac, 0.0, 1.0) * seq->duration()));
+        const Clip* clip = seq->topVideoClipAt(t);
+        if (!clip) {
+            return false;
+        }
+        const PreviewCache::Thumbnails* thumbs = m_owner->previews()->thumbnails(clip->source);
+        if (!thumbs || thumbs->images.empty()) {
+            return false;
+        }
+        int idx = 0;
+        if (thumbs->interval > 0.0) {
+            const double srcSec = secondsFromTicks(clip->sourceTimeAt(t));
+            idx = std::clamp(static_cast<int>(std::lround(srcSec / thumbs->interval)), 0,
+                             static_cast<int>(thumbs->images.size()) - 1);
+        }
         const QImage& img = thumbs->images[idx];
-        const QSize scaled = img.size().scaled(box.size(), Qt::KeepAspectRatio);
-        const QRect dst(box.left() + (box.width() - scaled.width()) / 2,
-                        box.top() + (box.height() - scaled.height()) / 2, scaled.width(), scaled.height());
-        p.drawImage(dst, img);
+
+        // Sequence canvas within the tile, then the clip at 100% relative scale.
+        QSize canvas(seq->width(), seq->height());
+        canvas.scale(box.size(), Qt::KeepAspectRatio);
+        const QRect canvasRect(box.left() + (box.width() - canvas.width()) / 2,
+                               box.top() + (box.height() - canvas.height()) / 2, canvas.width(),
+                               canvas.height());
+        p.fillRect(canvasRect, Qt::black);
+
+        const MediaSource* media = proj->media(clip->source);
+        const int mediaW = media && media->width > 0 ? media->width : img.width();
+        const int mediaH = media && media->height > 0 ? media->height : img.height();
+        const double scale = static_cast<double>(canvasRect.width()) / seq->width();
+        const int drawW = static_cast<int>(std::lround(mediaW * scale));
+        const int drawH = static_cast<int>(std::lround(mediaH * scale));
+        const QRect target(canvasRect.center().x() - drawW / 2, canvasRect.center().y() - drawH / 2,
+                           drawW, drawH);
+        p.save();
+        p.setClipRect(canvasRect);
+        p.drawImage(target, img);
+        p.restore();
+        return true;
     }
 
     MediaBrowser* m_owner;
@@ -371,14 +467,19 @@ protected:
             }
             return;
         }
+        if (item && item->data(kTypeRole).toInt() == kSequenceType) {
+            m_owner->openSequence(static_cast<SequenceId>(item->data(kIdRole).toULongLong()));
+            return;
+        }
         QListWidget::mouseDoubleClickEvent(event);
     }
 
     void keyPressEvent(QKeyEvent* event) override
     {
         if (event->key() == Qt::Key_F2) {
-            if (QListWidgetItem* item = currentItem();
-                item && item->data(kTypeRole).toInt() == kFolderType) {
+            if (QListWidgetItem* item = currentItem(); item
+                && (item->data(kTypeRole).toInt() == kFolderType
+                    || item->data(kTypeRole).toInt() == kSequenceType)) {
                 editItem(item);
                 return;
             }
@@ -436,10 +537,14 @@ protected:
     void contextMenuEvent(QContextMenuEvent* event) override
     {
         const QListWidgetItem* item = itemAt(event->pos());
-        const FolderId folder = (item && item->data(kTypeRole).toInt() == kFolderType)
+        const int type = item ? item->data(kTypeRole).toInt() : -1;
+        const FolderId folder = type == kFolderType
                                     ? static_cast<FolderId>(item->data(kIdRole).toULongLong())
                                     : 0;
-        m_owner->showMenu(event->globalPos(), selectedMedia(this), folder);
+        const SequenceId seq = type == kSequenceType
+                                   ? static_cast<SequenceId>(item->data(kIdRole).toULongLong())
+                                   : kInvalidSequence;
+        m_owner->showMenu(event->globalPos(), selectedMedia(this), folder, seq);
     }
 
 private:
@@ -447,10 +552,13 @@ private:
     {
         MediaId id = 0;
         double frac = -1.0;
-        if (const QListWidgetItem* item = itemAt(pos); item && item->data(kTypeRole).toInt() == kMediaType) {
-            const QRect tr = thumbRect(visualItemRect(item));
-            id = item->data(kIdRole).toULongLong();
-            frac = std::clamp((pos.x() - tr.left()) / static_cast<double>(std::max(1, tr.width())), 0.0, 1.0);
+        if (const QListWidgetItem* item = itemAt(pos); item) {
+            const int type = item->data(kTypeRole).toInt();
+            if (type == kMediaType || type == kSequenceType) {  // both scrub on hover
+                const QRect tr = thumbRect(visualItemRect(item));
+                id = item->data(kIdRole).toULongLong();
+                frac = std::clamp((pos.x() - tr.left()) / static_cast<double>(std::max(1, tr.width())), 0.0, 1.0);
+            }
         }
         if (id != m_hoverId || (id != 0 && std::abs(frac - m_hoverFrac) > 0.001)) {
             m_hoverId = id;
@@ -569,8 +677,9 @@ protected:
     void keyPressEvent(QKeyEvent* event) override
     {
         if (event->key() == Qt::Key_F2) {
-            if (QTreeWidgetItem* item = currentItem();
-                item && item->data(0, kTypeRole).toInt() == kFolderType) {
+            if (QTreeWidgetItem* item = currentItem(); item
+                && (item->data(0, kTypeRole).toInt() == kFolderType
+                    || item->data(0, kTypeRole).toInt() == kSequenceType)) {
                 editItem(item, kColName);
                 return;
             }
@@ -619,10 +728,14 @@ protected:
     void contextMenuEvent(QContextMenuEvent* event) override
     {
         const QTreeWidgetItem* item = itemAt(event->pos());
-        const FolderId folder = (item && item->data(0, kTypeRole).toInt() == kFolderType)
+        const int type = item ? item->data(0, kTypeRole).toInt() : -1;
+        const FolderId folder = type == kFolderType
                                     ? static_cast<FolderId>(item->data(0, kIdRole).toULongLong())
                                     : 0;
-        m_owner->showMenu(event->globalPos(), IconView::selectedMedia(this), folder);
+        const SequenceId seq = type == kSequenceType
+                                   ? static_cast<SequenceId>(item->data(0, kIdRole).toULongLong())
+                                   : kInvalidSequence;
+        m_owner->showMenu(event->globalPos(), IconView::selectedMedia(this), folder, seq);
     }
 
 private:
@@ -723,22 +836,36 @@ MediaBrowser::MediaBrowser(QWidget* parent)
         reportSelection(ids.isEmpty() ? kInvalidMedia : ids.front());
     });
     connect(m_iconView, &QListWidget::itemChanged, this, [this](QListWidgetItem* item) {
-        if (item->data(kTypeRole).toInt() == kFolderType)
-            commitRename(static_cast<FolderId>(item->data(kIdRole).toULongLong()), item->text());
+        const int type = item->data(kTypeRole).toInt();
+        const auto id = item->data(kIdRole).toULongLong();
+        if (type == kFolderType)
+            commitRename(static_cast<FolderId>(id), item->text());
+        else if (type == kSequenceType)
+            commitSequenceRename(static_cast<SequenceId>(id), item->text());
     });
 
     m_listView = new ListView(this);
     connect(m_listView, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem* item, int) {
-        if (item && item->data(0, kTypeRole).toInt() == kFolderType)
-            enterFolder(static_cast<FolderId>(item->data(0, kIdRole).toULongLong()));
+        if (!item) return;
+        const int type = item->data(0, kTypeRole).toInt();
+        const auto id = item->data(0, kIdRole).toULongLong();
+        if (type == kFolderType)
+            enterFolder(static_cast<FolderId>(id));
+        else if (type == kSequenceType)
+            openSequence(static_cast<SequenceId>(id));
     });
     connect(m_listView, &QTreeWidget::itemSelectionChanged, this, [this] {
         const auto ids = IconView::selectedMedia(m_listView);
         reportSelection(ids.isEmpty() ? kInvalidMedia : ids.front());
     });
     connect(m_listView, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* item, int column) {
-        if (column == kColName && item->data(0, kTypeRole).toInt() == kFolderType)
-            commitRename(static_cast<FolderId>(item->data(0, kIdRole).toULongLong()), item->text(kColName));
+        if (column != kColName) return;
+        const int type = item->data(0, kTypeRole).toInt();
+        const auto id = item->data(0, kIdRole).toULongLong();
+        if (type == kFolderType)
+            commitRename(static_cast<FolderId>(id), item->text(kColName));
+        else if (type == kSequenceType)
+            commitSequenceRename(static_cast<SequenceId>(id), item->text(kColName));
     });
 
     m_stack = new QStackedWidget(this);
@@ -889,6 +1016,41 @@ void MediaBrowser::commitRename(FolderId folder, const QString& name)
     emit folderRenamed(folder, trimmed);
 }
 
+void MediaBrowser::beginRenameSequence(SequenceId sequence)
+{
+    if (m_iconMode) {
+        for (int i = 0; i < m_iconView->count(); ++i) {
+            QListWidgetItem* item = m_iconView->item(i);
+            if (item->data(kTypeRole).toInt() == kSequenceType
+                && item->data(kIdRole).toULongLong() == sequence) {
+                m_iconView->setCurrentItem(item);
+                m_iconView->editItem(item);
+                return;
+            }
+        }
+    } else {
+        for (int i = 0; i < m_listView->topLevelItemCount(); ++i) {
+            QTreeWidgetItem* item = m_listView->topLevelItem(i);
+            if (item->data(0, kTypeRole).toInt() == kSequenceType
+                && item->data(0, kIdRole).toULongLong() == sequence) {
+                m_listView->setCurrentItem(item);
+                m_listView->editItem(item, kColName);
+                return;
+            }
+        }
+    }
+}
+
+void MediaBrowser::commitSequenceRename(SequenceId sequence, const QString& name)
+{
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty()) {
+        refresh();
+        return;
+    }
+    emit sequenceRenamed(sequence, trimmed);
+}
+
 void MediaBrowser::startMediaDrag(QAbstractItemView* view, const QList<MediaId>& ids, MediaId primary,
                                   const QPixmap& pixmap)
 {
@@ -920,11 +1082,23 @@ void MediaBrowser::dropFiles(const QStringList& paths, FolderId folder)
     if (!paths.isEmpty()) emit filesImported(paths, folder);
 }
 
-void MediaBrowser::showMenu(const QPoint& globalPos, const QList<MediaId>& media, FolderId folderUnderCursor)
+void MediaBrowser::showMenu(const QPoint& globalPos, const QList<MediaId>& media, FolderId folderUnderCursor,
+                            SequenceId sequenceUnderCursor)
 {
     QMenu menu(this);
+    QAction* newSequence = menu.addAction("New Sequence…");
     QAction* newFolder = menu.addAction("New Folder");
     QAction* import = menu.addAction("Import Media…");
+
+    QAction* openSeq = nullptr;
+    QAction* renameSeq = nullptr;
+    QAction* delSeq = nullptr;
+    if (sequenceUnderCursor != kInvalidSequence) {
+        menu.addSeparator();
+        openSeq = menu.addAction("Open Sequence");
+        renameSeq = menu.addAction("Rename");
+        delSeq = menu.addAction("Delete Sequence");
+    }
 
     // Label targets the media selection, or (if none) the folder under the cursor.
     const bool labelMedia = !media.isEmpty();
@@ -956,7 +1130,15 @@ void MediaBrowser::showMenu(const QPoint& globalPos, const QList<MediaId>& media
 
     QAction* chosen = menu.exec(globalPos);
     if (!chosen) return;
-    if (chosen == newFolder) {
+    if (chosen == newSequence) {
+        emit newSequenceRequested(m_current);
+    } else if (openSeq && chosen == openSeq) {
+        emit sequenceActivated(sequenceUnderCursor);
+    } else if (renameSeq && chosen == renameSeq) {
+        beginRenameSequence(sequenceUnderCursor);
+    } else if (delSeq && chosen == delSeq) {
+        emit deleteSequenceRequested(sequenceUnderCursor);
+    } else if (chosen == newFolder) {
         emit newFolderRequested(m_current);
     } else if (chosen == import) {
         emit importRequested(m_current);
@@ -1029,7 +1211,18 @@ void MediaBrowser::populate()
         }
     });
 
+    // Sequences in this bin.
+    std::vector<const Sequence*> seqs;
+    for (const Sequence& s : m_project->sequences()) {
+        if (s.folder() == m_current && matches(QString::fromStdString(s.name()))) {
+            seqs.push_back(&s);
+        }
+    }
+    std::sort(seqs.begin(), seqs.end(),
+              [](const Sequence* a, const Sequence* b) { return a->name() < b->name(); });
+
     for (const BinFolder* folder : folders) addFolderRow(*folder);
+    for (const Sequence* s : seqs) addSequenceRow(*s);
     for (const MediaSource* m : media) addMediaRow(*m);
 }
 
@@ -1084,6 +1277,33 @@ void MediaBrowser::addMediaRow(const MediaSource& m)
     row->setData(kColFps, Qt::UserRole, fps);
     row->setText(kColPath, QString::fromStdString(m.path));
     row->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsDragEnabled);
+}
+
+void MediaBrowser::addSequenceRow(const Sequence& s)
+{
+    const QString name = QString::fromStdString(s.name());
+    const auto id = static_cast<qulonglong>(s.id());
+    const double fps = s.rateDen() > 0 ? static_cast<double>(s.rateNum()) / s.rateDen() : 0.0;
+    const Tick dur = s.duration();
+
+    auto* icon = new QListWidgetItem(name, m_iconView);
+    icon->setData(kTypeRole, kSequenceType);
+    icon->setData(kIdRole, id);
+    icon->setData(kDurationRole, static_cast<qlonglong>(dur));
+    icon->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable);
+
+    auto* row = new BinItem(m_listView);
+    row->setData(0, kTypeRole, kSequenceType);
+    row->setData(0, kIdRole, id);
+    row->setIcon(kColName, QIcon(sequencePixmap(16)));
+    row->setText(kColName, name);
+    row->setText(kColType, "Sequence");
+    row->setText(kColDuration, shortDuration(dur));
+    row->setData(kColDuration, Qt::UserRole, secondsFromTicks(dur));
+    row->setText(kColFps, fps > 0 ? QString::number(fps, 'f', 2) : QString("—"));
+    row->setData(kColFps, Qt::UserRole, fps);
+    row->setText(kColPath, QString("%1 × %2").arg(s.width()).arg(s.height()));
+    row->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable | Qt::ItemIsEditable);
 }
 
 void MediaBrowser::updateBreadcrumb()

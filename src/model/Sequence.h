@@ -1,9 +1,11 @@
 #pragma once
 
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
+#include "model/Media.h"
 #include "model/Track.h"
 
 namespace hopline {
@@ -20,6 +22,14 @@ struct Resolved {
 class Sequence {
 public:
     Sequence();
+
+    // Identity in the project bin (0/empty for the legacy default sequence).
+    SequenceId id() const { return m_id; }
+    void setId(SequenceId id) { m_id = id; }
+    const std::string& name() const { return m_name; }
+    void setName(std::string name) { m_name = std::move(name); }
+    FolderId folder() const { return m_folder; }
+    void setFolder(FolderId folder) { m_folder = folder; }
 
     int rateNum() const { return m_rateNum; }
     int rateDen() const { return m_rateDen; }
@@ -66,6 +76,9 @@ public:
     Tick snapToFrame(Tick time) const;
 
 private:
+    SequenceId m_id = kInvalidSequence;
+    std::string m_name;
+    FolderId m_folder = kRootFolder;
     std::vector<Track> m_tracks;
     int m_rateNum = 30;
     int m_rateDen = 1;

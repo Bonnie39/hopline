@@ -21,6 +21,7 @@ namespace hopline {
 
 class Project;
 class PreviewCache;
+class Sequence;
 
 // MIME carrying the single primary MediaId (kept single so TimelineWidget's drop
 // path is unchanged), plus a comma-joined list of every selected id for
@@ -64,6 +65,10 @@ signals:
     void mediaLabelChanged(QList<MediaId> media, int label);
     void folderLabelChanged(FolderId folder, int label);
     void folderRenamed(FolderId folder, QString name);
+    void newSequenceRequested(FolderId folder);
+    void sequenceActivated(SequenceId sequence);
+    void sequenceRenamed(SequenceId sequence, QString name);
+    void deleteSequenceRequested(SequenceId sequence);
 
 private:
     class IconView;
@@ -78,8 +83,11 @@ private:
                         const QPixmap& pixmap);
     void dropOnFolder(const QList<MediaId>& ids, FolderId folder);
     void dropFiles(const QStringList& paths, FolderId folder);
-    void showMenu(const QPoint& globalPos, const QList<MediaId>& media, FolderId folderUnderCursor);
+    void showMenu(const QPoint& globalPos, const QList<MediaId>& media, FolderId folderUnderCursor,
+                  SequenceId sequenceUnderCursor);
     void commitRename(FolderId folder, const QString& name);
+    void beginRenameSequence(SequenceId sequence);
+    void openSequence(SequenceId sequence) { emit sequenceActivated(sequence); }
 
     void setIconMode(bool icon);
     void setThumbSize(int width);
@@ -87,8 +95,11 @@ private:
     void populate();
     void addFolderRow(const BinFolder& folder);
     void addMediaRow(const MediaSource& media);
+    void addSequenceRow(const Sequence& sequence);
+    void commitSequenceRename(SequenceId sequence, const QString& name);
     void updateBreadcrumb();
     const PreviewCache* previews() const { return m_previews; }
+    const Project* project() const { return m_project; }
 
     IconView* m_iconView = nullptr;
     ListView* m_listView = nullptr;

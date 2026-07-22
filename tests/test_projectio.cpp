@@ -35,8 +35,8 @@ Project buildProject()
     const MediaId b = project.addMedia(makeSource(50000), sub);
     project.setMediaLabel(a, 4);   // exercise media label round-trip
     project.setFolderLabel(sub, 5);  // exercise folder label round-trip
-    project.sequence().setFrameRate(30000, 1001);
-    project.sequence().setResolution(1920, 1080);
+    const SequenceId seqId = project.addSequence("Main Edit", 30000, 1001, 1920, 1080, sub);
+    project.setActiveSequence(seqId);
 
     CommandStack stack;
     const LinkGroup group = project.nextLinkGroup();
@@ -91,6 +91,13 @@ TEST_CASE("a project round-trips through serialize/deserialize", "[projectio]")
         CHECK(l->rateNum == m.rateNum);
         CHECK(l->rateDen == m.rateDen);
     }
+
+    // Sequences: list, active id, and per-sequence identity round-trip.
+    REQUIRE(loaded.sequences().size() == original.sequences().size());
+    CHECK(loaded.activeSequenceId() == original.activeSequenceId());
+    CHECK(loaded.sequence().name() == original.sequence().name());
+    CHECK(loaded.sequence().folder() == original.sequence().folder());
+    CHECK(loaded.sequence().id() == original.sequence().id());
 
     // Sequence structure.
     REQUIRE(loaded.sequence().trackCount() == original.sequence().trackCount());

@@ -61,11 +61,19 @@ Clip makeClip(MediaId source, Tick start, Tick duration, Tick sourceIn = 0)
     return clip;
 }
 
+// A project with one active sequence (V1/A1) — commands operate on the active one.
+Project seqProject()
+{
+    Project project;
+    project.setActiveSequence(project.addSequence("Sequence", 30, 1, 1920, 1080));
+    return project;
+}
+
 }  // namespace
 
 TEST_CASE("add then undo restores the empty timeline", "[commands]")
 {
-    Project project;
+    Project project = seqProject();
     CommandStack stack;
     const MediaId source = addSource(project);
     const Snapshot before = snapshot(project);
@@ -79,7 +87,7 @@ TEST_CASE("add then undo restores the empty timeline", "[commands]")
 
 TEST_CASE("redo reproduces the edit exactly, id included", "[commands]")
 {
-    Project project;
+    Project project = seqProject();
     CommandStack stack;
     const MediaId source = addSource(project);
 
@@ -96,7 +104,7 @@ TEST_CASE("redo reproduces the edit exactly, id included", "[commands]")
 
 TEST_CASE("a rejected edit never lands on the undo stack", "[commands]")
 {
-    Project project;
+    Project project = seqProject();
     CommandStack stack;
     const MediaId source = addSource(project);
 
@@ -114,7 +122,7 @@ TEST_CASE("a rejected edit never lands on the undo stack", "[commands]")
 
 TEST_CASE("every command round-trips through undo", "[commands]")
 {
-    Project project;
+    Project project = seqProject();
     CommandStack stack;
     const MediaId source = addSource(project);
 
@@ -196,7 +204,7 @@ TEST_CASE("every command round-trips through undo", "[commands]")
 
 TEST_CASE("trims that would invert or run past the source are rejected", "[commands]")
 {
-    Project project;
+    Project project = seqProject();
     CommandStack stack;
     const MediaId source = addSource(project);
 
@@ -218,7 +226,7 @@ TEST_CASE("trims that would invert or run past the source are rejected", "[comma
 
 TEST_CASE("splitting at a clip edge is rejected", "[commands]")
 {
-    Project project;
+    Project project = seqProject();
     CommandStack stack;
     const MediaId source = addSource(project);
 
@@ -233,7 +241,7 @@ TEST_CASE("splitting at a clip edge is rejected", "[commands]")
 
 TEST_CASE("clips cannot be placed at negative timeline positions", "[commands]")
 {
-    Project project;
+    Project project = seqProject();
     CommandStack stack;
     const MediaId source = addSource(project);
 
@@ -253,7 +261,7 @@ TEST_CASE("clips cannot be placed at negative timeline positions", "[commands]")
 
 TEST_CASE("clips cannot extend past the end of their source", "[commands]")
 {
-    Project project;
+    Project project = seqProject();
     CommandStack stack;
     const MediaId source = addSource(project, 1000);  // source is only 1000 ticks long
 
@@ -272,7 +280,7 @@ TEST_CASE("clips cannot extend past the end of their source", "[commands]")
 
 TEST_CASE("clips referencing unknown media are rejected", "[commands]")
 {
-    Project project;
+    Project project = seqProject();
     CommandStack stack;
 
     CHECK_FALSE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(999, 0, 1000))));
@@ -281,7 +289,7 @@ TEST_CASE("clips referencing unknown media are rejected", "[commands]")
 
 TEST_CASE("compound command applies and undoes as one unit", "[commands]")
 {
-    Project project;
+    Project project = seqProject();
     CommandStack stack;
     const MediaId source = addSource(project);
 
@@ -335,7 +343,7 @@ TEST_CASE("compound command applies and undoes as one unit", "[commands]")
 
 TEST_CASE("unlink clears the group and undo restores it", "[commands]")
 {
-    Project project;
+    Project project = seqProject();
     CommandStack stack;
     const MediaId source = addSource(project);
 
@@ -360,7 +368,7 @@ TEST_CASE("unlink clears the group and undo restores it", "[commands]")
 
 TEST_CASE("a new edit clears the redo branch", "[commands]")
 {
-    Project project;
+    Project project = seqProject();
     CommandStack stack;
     const MediaId source = addSource(project);
 
@@ -374,7 +382,7 @@ TEST_CASE("a new edit clears the redo branch", "[commands]")
 
 TEST_CASE("long undo/redo chains stay consistent", "[commands]")
 {
-    Project project;
+    Project project = seqProject();
     CommandStack stack;
     const MediaId source = addSource(project);
 
