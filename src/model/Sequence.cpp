@@ -32,6 +32,13 @@ size_t Sequence::addTrack(Track::Kind kind, std::string name)
     return m_tracks.size() - 1;
 }
 
+void Sequence::removeTrackAt(size_t index)
+{
+    if (index < m_tracks.size()) {
+        m_tracks.erase(m_tracks.begin() + index);
+    }
+}
+
 Tick Sequence::duration() const
 {
     Tick longest = 0;

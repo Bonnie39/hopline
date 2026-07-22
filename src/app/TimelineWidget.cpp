@@ -142,11 +142,92 @@ int TimelineWidget::trackTop(std::size_t index) const
 {
     // Center the track block vertically in the area below the ruler, so it grows
     // from the middle as more tracks are added.
-    const int count = m_project ? static_cast<int>(m_project->sequence().trackCount()) : 0;
-    const int block = count > 0 ? count * kTrackHeight + (count - 1) * kTrackGap : 0;
+    if (!m_project) {
+        return kRulerHeight;
+    }
+    const Sequence& seq = m_project->sequence();
+    const TrackLayout lay = trackLayout();
+    const int stride = kTrackHeight + kTrackGap;
+    const bool video = seq.track(index).kind() == Track::Kind::Video;
+    int level = 0;  // 0 = V1/A1 (nearest the divider)
+    for (std::size_t i = 0; i < index; ++i) {
+        if ((seq.track(i).kind() == Track::Kind::Video) == video) {
+            ++level;
+        }
+    }
+    return video ? lay.videoBottom - kTrackHeight - level * stride  // stack up from the divider
+                 : lay.audioTop + level * stride;                   // stack down from the divider
+}
+
+TimelineWidget::TrackLayout TimelineWidget::trackLayout() const
+{
+    TrackLayout lay;
+    lay.dividerY = lay.videoBottom = lay.audioTop = kRulerHeight;
+    if (!m_project) {
+        return lay;
+    }
+    const Sequence& seq = m_project->sequence();
+    int nv = 0, na = 0;
+    for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+        (seq.track(i).kind() == Track::Kind::Video ? nv : na)++;
+    }
+    const int videoH = nv > 0 ? nv * kTrackHeight + (nv - 1) * kTrackGap : 0;
+    const int audioH = na > 0 ? na * kTrackHeight + (na - 1) * kTrackGap : 0;
+    const int gap = (nv > 0 && na > 0) ? kTrackGap : 0;
+    const int total = videoH + gap + audioH;
     const int avail = height() - kRulerHeight;
-    const int offset = kRulerHeight + std::max(kTrackGap, (avail - block) / 2);
-    return offset + static_cast<int>(index) * (kTrackHeight + kTrackGap);
+    const int blockTop = kRulerHeight + std::max(kTrackGap, (avail - total) / 2);
+    lay.videoBottom = blockTop + videoH;
+    lay.audioTop = lay.videoBottom + gap;
+    lay.dividerY = lay.videoBottom + gap / 2;
+    return lay;
+}
+
+int TimelineWidget::trackAtY(int y) const
+{
+    if (!m_project) {
+        return -1;
+    }
+    for (std::size_t i = 0; i < m_project->sequence().trackCount(); ++i) {
+        const int top = trackTop(i);
+        if (y >= top && y < top + kTrackHeight) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+int TimelineWidget::levelOfTrack(std::size_t index) const
+{
+    if (!m_project) {
+        return 0;
+    }
+    const Sequence& seq = m_project->sequence();
+    const bool video = seq.track(index).kind() == Track::Kind::Video;
+    int level = 0;
+    for (std::size_t i = 0; i < index; ++i) {
+        if ((seq.track(i).kind() == Track::Kind::Video) == video) {
+            ++level;
+        }
+    }
+    return level;
+}
+
+int TimelineWidget::levelToY(int level, bool video) const
+{
+    const TrackLayout lay = trackLayout();
+    const int stride = kTrackHeight + kTrackGap;
+    return video ? lay.videoBottom - kTrackHeight - level * stride  // levels go up
+                 : lay.audioTop + level * stride;                   // levels go down
+}
+
+int TimelineWidget::levelForY(int y, bool video) const
+{
+    const TrackLayout lay = trackLayout();
+    const int stride = kTrackHeight + kTrackGap;
+    const double level = video ? static_cast<double>(lay.videoBottom - kTrackHeight - y) / stride
+                               : static_cast<double>(y - lay.audioTop) / stride;
+    return std::max(0, static_cast<int>(std::lround(level)));
 }
 
 TimelineWidget::Hit TimelineWidget::hitTest(const QPoint& pos) const
@@ -327,6 +408,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event)
             setCursor(Qt::SizeHorCursor);  // trim only; moving keeps the default cursor
         }
         m_previewDelta = 0;
+        m_dragLevelDelta = 0;
         m_pressX = pos.x();
         m_dragMoved = false;
         update();
@@ -356,9 +438,19 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event)
 
     Tick delta = snapDelta(ticksFromSeconds(dxPixels / m_pixelsPerSecond));
     switch (m_drag) {
-    case Drag::Move:
+    case Drag::Move: {
         delta = clampMoveDelta(delta);
+        // Vertical: how many track-levels (in the dragged clip's kind) the cursor
+        // has crossed. The move mirrors this across every linked member's kind.
+        if (m_project && m_dragTrack < m_project->sequence().trackCount()) {
+            const bool video = m_project->sequence().track(m_dragTrack).kind() == Track::Kind::Video;
+            m_dragLevelDelta = levelForY(pos.y(), video) - levelOfTrack(m_dragTrack);
+            if (m_dragLevelDelta != 0) {
+                m_dragMoved = true;  // a purely vertical move still counts
+            }
+        }
         break;
+    }
     case Drag::TrimHead:
         delta = clampTrimDelta(delta, true);
         break;
@@ -379,12 +471,14 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event)
         return;
     }
 
-    if (m_drag != Drag::None && m_drag != Drag::Scrub && m_dragMoved && m_previewDelta != 0) {
+    const bool moved = m_previewDelta != 0 || (m_drag == Drag::Move && m_dragLevelDelta != 0);
+    if (m_drag != Drag::None && m_drag != Drag::Scrub && m_dragMoved && moved) {
         commitDrag();
     }
 
     m_drag = Drag::None;
     m_previewDelta = 0;
+    m_dragLevelDelta = 0;
     m_dragClip = kInvalidClip;
     updateHoverCursor(event->position().toPoint());
     update();
@@ -394,7 +488,7 @@ void TimelineWidget::commitDrag()
 {
     switch (m_drag) {
     case Drag::Move:
-        emit clipMoved(m_dragTrack, m_dragClip, m_dragOrigStart + m_previewDelta);
+        emit clipMoved(m_dragTrack, m_dragClip, m_dragLevelDelta, m_dragOrigStart + m_previewDelta);
         break;
     case Drag::TrimHead:
         emit clipTrimmed(m_dragTrack, m_dragClip, true, m_previewDelta);
@@ -409,8 +503,30 @@ void TimelineWidget::commitDrag()
 
 void TimelineWidget::contextMenuEvent(QContextMenuEvent* event)
 {
+    if (!m_project) {
+        return;
+    }
     const Hit hit = hitTest(event->pos());
-    if (!hit.onClip || !m_project) {
+    if (!hit.onClip) {
+        // Empty area / track header: track management.
+        QMenu menu(this);
+        QAction* addVideo = menu.addAction("Add Video Track");
+        QAction* addAudio = menu.addAction("Add Audio Track");
+        const int trk = trackAtY(event->pos().y());
+        QAction* delTrack = nullptr;
+        if (trk >= 0) {
+            menu.addSeparator();
+            delTrack = menu.addAction(
+                QString("Delete %1").arg(QString::fromStdString(m_project->sequence().track(trk).name())));
+        }
+        QAction* chosen = menu.exec(event->globalPos());
+        if (chosen == addVideo) {
+            emit addTrackRequested(true);
+        } else if (chosen == addAudio) {
+            emit addTrackRequested(false);
+        } else if (delTrack && chosen == delTrack) {
+            emit deleteTrackRequested(static_cast<std::size_t>(trk));
+        }
         return;
     }
 
@@ -481,6 +597,10 @@ void TimelineWidget::updateDropGhost(const QPoint& pos, const QMimeData* mime)
             m_dropDuration = media->duration;
             m_dropVideo = media->hasVideo;
             m_dropAudio = media->hasAudio;
+            // The cursor's region (above/below the divider) picks the level; both the
+            // V and A halves land on that level (mirrored), creating tracks if needed.
+            const bool videoRegion = pos.y() < trackLayout().dividerY;
+            m_dropLevel = levelForY(pos.y(), videoRegion);
             m_dropActive = true;
         }
     }
@@ -511,21 +631,23 @@ void TimelineWidget::dropEvent(QDropEvent* event)
 {
     m_dropActive = false;
 
-    const int x = event->position().toPoint().x();
-    Tick start = tickForX(x);
+    const QPoint pos = event->position().toPoint();
+    Tick start = tickForX(pos.x());
     if (m_project) {
         start = m_project->sequence().snapToFrame(start);
     }
     start = std::max<Tick>(0, start);
+    const bool videoRegion = m_project && pos.y() < trackLayout().dividerY;
+    const int level = levelForY(pos.y(), videoRegion);
 
     if (event->mimeData()->hasFormat(kMediaMimeType)) {
         const MediaId id = event->mimeData()->data(kMediaMimeType).toULongLong();
-        emit mediaDropped(id, start);
+        emit mediaDropped(id, start, level);
         event->acceptProposedAction();
     } else if (event->mimeData()->hasUrls()) {
         for (const QUrl& url : event->mimeData()->urls()) {
             if (url.isLocalFile()) {
-                emit fileDropped(url.toLocalFile(), start);
+                emit fileDropped(url.toLocalFile(), start, level);
             }
         }
         event->acceptProposedAction();
@@ -595,6 +717,10 @@ void TimelineWidget::drawTracks(QPainter& painter)
     const bool dragging = (m_drag == Drag::Move || m_drag == Drag::TrimHead || m_drag == Drag::TrimTail);
     const std::vector<ClipId> affected = dragging ? affectedByDrag() : std::vector<ClipId>{};
 
+    // Center divider between the video block (above) and audio block (below).
+    const TrackLayout lay = trackLayout();
+    painter.fillRect(QRect(0, lay.dividerY - 1, width(), 2), QColor(70, 71, 76));
+
     auto isAffected = [&](ClipId id) {
         return std::find(affected.begin(), affected.end(), id) != affected.end();
     };
@@ -626,14 +752,14 @@ void TimelineWidget::drawTracks(QPainter& painter)
             Tick start = clip.timelineStart;
             Tick duration = clip.duration;
             Tick sourceIn = clip.sourceIn;
+            // Trimming resizes the clip live; moving leaves the clip in place (with
+            // its selection outline) and shows a destination silhouette after the loop.
             if (dragging && isAffected(clip.id)) {
-                if (m_drag == Drag::Move) {
-                    start += m_previewDelta;
-                } else if (m_drag == Drag::TrimHead) {
+                if (m_drag == Drag::TrimHead) {
                     start += m_previewDelta;
                     duration -= m_previewDelta;
                     sourceIn += m_previewDelta;  // head trim advances into the source
-                } else {
+                } else if (m_drag == Drag::TrimTail) {
                     duration += m_previewDelta;
                 }
             }
@@ -708,6 +834,34 @@ void TimelineWidget::drawTracks(QPainter& painter)
         painter.setPen(kGridLine);
         painter.drawLine(0, y + kTrackHeight, width(), y + kTrackHeight);
     }
+
+    // Destination silhouette(s) for a move: only the dragged clip changes track;
+    // linked partners keep their track and shift in time together.
+    if (m_drag == Drag::Move && (m_previewDelta != 0 || m_dragLevelDelta != 0)) {
+        painter.setPen(QPen(QColor(225, 226, 232, 170), 1, Qt::DashLine));
+        painter.setBrush(QColor(255, 255, 255, 28));
+        for (std::size_t i = 0; i < sequence.trackCount(); ++i) {
+            const bool isVideo = sequence.track(i).kind() == Track::Kind::Video;
+            for (const Clip& clip : sequence.track(i).clips()) {
+                if (!isAffected(clip.id)) {
+                    continue;
+                }
+                const bool dragged = clip.id == m_dragClip;
+                const Tick destStart = clip.timelineStart + m_previewDelta;
+                const int destLevel = levelOfTrack(i) + (dragged ? m_dragLevelDelta : 0);
+                if (destStart == clip.timelineStart && destLevel == levelOfTrack(i)) {
+                    continue;  // no change for this member
+                }
+                const int destY = levelToY(destLevel, isVideo);
+                const int dx0 = std::max(xForTick(destStart), kHeaderWidth);
+                const int dx1 = xForTick(destStart + clip.duration);
+                if (dx1 <= kHeaderWidth) {
+                    continue;
+                }
+                painter.drawRoundedRect(QRect(dx0, destY + 3, dx1 - dx0, kTrackHeight - 6), 3, 3);
+            }
+        }
+    }
 }
 
 void TimelineWidget::drawThumbnails(QPainter& painter, const Clip& clip, const QRect& box, int x0,
@@ -774,18 +928,15 @@ void TimelineWidget::drawDropGhost(QPainter& painter)
     painter.setPen(pen);
     painter.setBrush(QColor(kSelected.red(), kSelected.green(), kSelected.blue(), 40));
 
-    auto drawLane = [&](int trackIndex) {
-        if (trackIndex < 0) {
-            return;
-        }
-        const int y = trackTop(static_cast<std::size_t>(trackIndex));
+    auto drawLane = [&](bool video) {
+        const int y = levelToY(m_dropLevel, video);  // handles levels beyond existing tracks
         painter.drawRoundedRect(QRect(x0, y + 3, x1 - x0, kTrackHeight - 6), 3, 3);
     };
     if (m_dropVideo) {
-        drawLane(firstTrackOfKind(true));
+        drawLane(true);
     }
     if (m_dropAudio) {
-        drawLane(firstTrackOfKind(false));
+        drawLane(false);
     }
 }
 

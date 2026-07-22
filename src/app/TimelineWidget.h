@@ -46,13 +46,15 @@ public:
 signals:
     void playheadDragged(Tick time);
     void selectionChanged(ClipId clip);
-    void clipMoved(std::size_t trackIndex, ClipId clip, Tick newStart);
+    void clipMoved(std::size_t fromTrack, ClipId clip, int levelDelta, Tick newStart);
     void clipTrimmed(std::size_t trackIndex, ClipId clip, bool trimHead, Tick delta);
     void unlinkRequested(ClipId clip);
     void clipLabelRequested(std::size_t trackIndex, ClipId clip, int label);
     void deleteRequested(std::size_t trackIndex, ClipId clip);
-    void mediaDropped(MediaId media, Tick start);
-    void fileDropped(const QString& path, Tick start);
+    void addTrackRequested(bool video);
+    void deleteTrackRequested(std::size_t trackIndex);
+    void mediaDropped(MediaId media, Tick start, int level);
+    void fileDropped(const QString& path, Tick start, int level);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -77,9 +79,25 @@ private:
         int edge = -1;  // -1 body, 0 head, 1 tail
     };
 
+    // Tracks stack outward from a center divider: video above (V1 at the divider,
+    // higher tracks up), audio below (A1 at the divider, higher tracks down).
+    struct TrackLayout {
+        int dividerY = 0;
+        int videoBottom = 0;  // bottom edge of the video block (V1's bottom)
+        int audioTop = 0;     // top edge of the audio block (A1's top)
+    };
+    TrackLayout trackLayout() const;
+
     int xForTick(Tick time) const;
     Tick tickForX(int x) const;
     int trackTop(std::size_t index) const;
+    int trackAtY(int y) const;  // sequence track index under y, or -1
+    // Level = a track's position among same-kind tracks (0 = V1/A1). These map a
+    // level to/from a y even for levels beyond the existing tracks (for cross-track
+    // moves that create new tracks).
+    int levelOfTrack(std::size_t index) const;
+    int levelToY(int level, bool video) const;
+    int levelForY(int y, bool video) const;
     Hit hitTest(const QPoint& pos) const;
 
     void scrubTo(int x);
@@ -117,6 +135,7 @@ private:
     Tick m_dragOrigStart = 0;
     Tick m_dragOrigDuration = 0;
     Tick m_previewDelta = 0;
+    int m_dragLevelDelta = 0;  // vertical track-levels the move drag has crossed
     int m_pressX = 0;
     bool m_dragMoved = false;
 
@@ -128,6 +147,7 @@ private:
     Tick m_dropDuration = 0;
     bool m_dropVideo = false;
     bool m_dropAudio = false;
+    int m_dropLevel = 0;  // target track level (same for the V and A halves — mirrored)
 };
 
 }  // namespace hopline

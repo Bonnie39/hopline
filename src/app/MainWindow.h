@@ -51,14 +51,16 @@ private slots:
     void onNewSequence(FolderId folder);
     void onSequenceActivated(SequenceId sequence);
     void onDeleteSequence(SequenceId sequence);
-    void onMediaDropped(MediaId media, Tick start);
-    void onFileDropped(const QString& path, Tick start);
+    void onMediaDropped(MediaId media, Tick start, int level);
+    void onFileDropped(const QString& path, Tick start, int level);
+    void onAddTrack(bool video);
+    void onDeleteTrack(std::size_t trackIndex);
     void togglePlay();
     void tick();
     void seekRelative(double seconds);
     void timelineScrubbed(Tick time);
 
-    void onClipMoved(std::size_t trackIndex, ClipId clip, Tick newStart);
+    void onClipMoved(std::size_t fromTrack, ClipId clip, int levelDelta, Tick newStart);
     void onClipTrimmed(std::size_t trackIndex, ClipId clip, bool trimHead, Tick delta);
     void onUnlink(ClipId clip);
     void onClipLabel(std::size_t trackIndex, ClipId clip, int label);
@@ -74,10 +76,13 @@ private:
     void applyDefaultLayout();
     void reopenPlayer();
     MediaId importMedia(const QString& path, FolderId folder);
-    void placeMedia(MediaId media, Tick start);
+    void placeMedia(MediaId media, Tick start, int level = 0);
     bool mediaInUse(MediaId id) const;
     void activateSequence(SequenceId sequence);
     SequenceId ensureActiveSequence(const MediaSource& source);
+    void seedTracks(SequenceId sequence);  // pad a new sequence to 3 video + 3 audio tracks
+    int trackIndexForLevel(bool video, int level);
+    void ensureTrackLevel(bool video, int level);
     void syncSequenceTabs();
     void closeSequenceTab(int index);
     void refreshPreviewsForProject();

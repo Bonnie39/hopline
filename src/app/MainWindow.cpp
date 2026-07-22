@@ -39,7 +39,7 @@ namespace {
 
 // Bump when the dock set or default arrangement changes, so a stale saved layout
 // is discarded.
-constexpr int kLayoutVersion = 5;
+constexpr int kLayoutVersion = 6;
 
 // Transport time readout: M:SS.CC.
 QString formatClock(double seconds)
@@ -162,6 +162,8 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_timeline, &TimelineWidget::unlinkRequested, this, &MainWindow::onUnlink);
     connect(m_timeline, &TimelineWidget::clipLabelRequested, this, &MainWindow::onClipLabel);
     connect(m_timeline, &TimelineWidget::deleteRequested, this, &MainWindow::onDeleteClip);
+    connect(m_timeline, &TimelineWidget::addTrackRequested, this, &MainWindow::onAddTrack);
+    connect(m_timeline, &TimelineWidget::deleteTrackRequested, this, &MainWindow::onDeleteTrack);
     connect(m_timeline, &TimelineWidget::selectionChanged, this, [this](ClipId clip) {
         statusBar()->showMessage(clip ? QString("Selected clip %1").arg(clip) : QString("Ready"));
     });
@@ -334,7 +336,7 @@ void MainWindow::applyDefaultLayout()
     const int w = width() > 100 ? width() : 1600;
     resizeDocks({ m_browserDock, m_toolsDock, m_timelineDock, m_meterDock }, { 300, 42, w - 412, 70 },
                 Qt::Horizontal);
-    resizeDocks({ m_browserDock, m_timelineDock }, { 360, 360 }, Qt::Vertical);  // taller timeline
+    resizeDocks({ m_browserDock, m_timelineDock }, { 440, 440 }, Qt::Vertical);  // taller timeline (fits 3+3 tracks)
 }
 
 void MainWindow::showEvent(QShowEvent* event)
@@ -430,8 +432,57 @@ SequenceId MainWindow::ensureActiveSequence(const MediaSource& source)
     const int w = source.width > 0 ? source.width : 1920;
     const int h = source.height > 0 ? source.height : 1080;
     const SequenceId id = m_project.addSequence("Sequence 1", rn, rd, w, h, kRootFolder);
+    seedTracks(id);
     activateSequence(id);
     return id;
+}
+
+void MainWindow::seedTracks(SequenceId sequence)
+{
+    Sequence* seq = m_project.sequenceById(sequence);
+    if (!seq) {
+        return;
+    }
+    int nv = 0, na = 0;
+    for (std::size_t i = 0; i < seq->trackCount(); ++i) {
+        (seq->track(i).kind() == Track::Kind::Video ? nv : na)++;
+    }
+    for (; nv < 3; ++nv) {
+        seq->addTrack(Track::Kind::Video, QString("V%1").arg(nv + 1).toStdString());
+    }
+    for (; na < 3; ++na) {
+        seq->addTrack(Track::Kind::Audio, QString("A%1").arg(na + 1).toStdString());
+    }
+}
+
+int MainWindow::trackIndexForLevel(bool video, int level)
+{
+    const Sequence& seq = m_project.sequence();
+    int l = 0;
+    for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+        if ((seq.track(i).kind() == Track::Kind::Video) == video) {
+            if (l == level) {
+                return static_cast<int>(i);
+            }
+            ++l;
+        }
+    }
+    return -1;
+}
+
+void MainWindow::ensureTrackLevel(bool video, int level)
+{
+    Sequence& seq = m_project.sequence();
+    int count = 0;
+    for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+        if ((seq.track(i).kind() == Track::Kind::Video) == video) {
+            ++count;
+        }
+    }
+    for (; count <= level; ++count) {
+        const QString name = QString("%1%2").arg(video ? "V" : "A").arg(count + 1);
+        seq.addTrack(video ? Track::Kind::Video : Track::Kind::Audio, name.toStdString());
+    }
 }
 
 void MainWindow::onNewSequence(FolderId folder)
@@ -442,6 +493,7 @@ void MainWindow::onNewSequence(FolderId folder)
     }
     const SequenceSettings s = dialog.settings();
     const SequenceId id = m_project.addSequence(s.name.toStdString(), s.rateNum, s.rateDen, s.width, s.height, folder);
+    seedTracks(id);
     activateSequence(id);
     statusBar()->showMessage(QString("Created sequence \"%1\"").arg(s.name));
 }
@@ -512,15 +564,29 @@ MediaId MainWindow::importMedia(const QString& path, FolderId folder)
     return id;
 }
 
-void MainWindow::placeMedia(MediaId media, Tick start)
+void MainWindow::placeMedia(MediaId media, Tick start, int level)
 {
     const MediaSource* source = m_project.media(media);
     if (!source) {
         return;
     }
+    const bool hadSequence = m_project.hasActiveSequence();
     ensureActiveSequence(*source);  // make (and open) a sequence if the project has none
-    if (m_project.sequence().trackCount() < 2) {
-        return;
+    if (!hadSequence) {
+        start = 0;  // a clip that creates a new sequence starts at the very beginning
+    }
+
+    // Both halves land on the target level (mirrored), creating tracks if the drop
+    // was above/below the outermost track.
+    const int lvl = std::max(0, level);
+    int videoTrack = -1, audioTrack = -1;
+    if (source->hasVideo) {
+        ensureTrackLevel(true, lvl);
+        videoTrack = trackIndexForLevel(true, lvl);
+    }
+    if (source->hasAudio) {
+        ensureTrackLevel(false, lvl);
+        audioTrack = trackIndexForLevel(false, lvl);
     }
 
     Clip clip;
@@ -529,16 +595,16 @@ void MainWindow::placeMedia(MediaId media, Tick start)
     clip.sourceIn = 0;
     clip.duration = source->duration;
     clip.label = source->label;  // inherit the bin color; editable on the timeline after
-    if (source->hasVideo && source->hasAudio) {
+    if (source->hasVideo && source->hasAudio && videoTrack >= 0 && audioTrack >= 0) {
         clip.linkGroup = m_project.nextLinkGroup();
     }
 
     auto compound = std::make_unique<CompoundCommand>("Add Clip");
-    if (source->hasVideo) {
-        compound->add(std::make_unique<AddClipCommand>(0, clip));
+    if (source->hasVideo && videoTrack >= 0) {
+        compound->add(std::make_unique<AddClipCommand>(static_cast<std::size_t>(videoTrack), clip));
     }
-    if (source->hasAudio) {
-        compound->add(std::make_unique<AddClipCommand>(1, clip));
+    if (source->hasAudio && audioTrack >= 0) {
+        compound->add(std::make_unique<AddClipCommand>(static_cast<std::size_t>(audioTrack), clip));
     }
     if (compound->empty()) {
         return;
@@ -697,17 +763,48 @@ void MainWindow::onDeleteMedia(QList<MediaId> media)
     }
 }
 
-void MainWindow::onMediaDropped(MediaId media, Tick start)
+void MainWindow::onMediaDropped(MediaId media, Tick start, int level)
 {
-    placeMedia(media, start);
+    placeMedia(media, start, level);
 }
 
-void MainWindow::onFileDropped(const QString& path, Tick start)
+void MainWindow::onFileDropped(const QString& path, Tick start, int level)
 {
     const MediaId id = importMedia(path, kRootFolder);
     if (id != kInvalidMedia) {
-        placeMedia(id, start);
+        placeMedia(id, start, level);
     }
+}
+
+void MainWindow::onAddTrack(bool video)
+{
+    if (!m_project.hasActiveSequence()) {
+        return;
+    }
+    Sequence& seq = m_project.sequence();
+    int count = 0;
+    for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+        if ((seq.track(i).kind() == Track::Kind::Video) == video) {
+            ++count;
+        }
+    }
+    const QString name = QString("%1%2").arg(video ? "V" : "A").arg(count + 1);
+    // Append (indices of existing tracks are unchanged, so the undo stack stays valid).
+    seq.addTrack(video ? Track::Kind::Video : Track::Kind::Audio, name.toStdString());
+    commitEdit();
+}
+
+void MainWindow::onDeleteTrack(std::size_t trackIndex)
+{
+    if (!m_project.hasActiveSequence() || trackIndex >= m_project.sequence().trackCount()) {
+        return;
+    }
+    // Removing a track shifts higher track indices, which would invalidate the
+    // index-based undo commands — so this clears the undo history.
+    m_project.sequence().removeTrackAt(trackIndex);
+    m_commands.clear();
+    m_timeline->clearSelection();
+    commitEdit();
 }
 
 void MainWindow::timelineScrubbed(Tick time)
@@ -751,18 +848,49 @@ void MainWindow::commitEdit()
     }
 }
 
-void MainWindow::onClipMoved(std::size_t trackIndex, ClipId clip, Tick newStart)
+void MainWindow::onClipMoved(std::size_t fromTrack, ClipId clip, int levelDelta, Tick newStart)
 {
-    const Clip* c = m_project.sequence().findClip(clip);
-    if (!c) {
+    const Clip* dragged = m_project.sequence().findClip(clip);
+    if (!dragged) {
         return;
     }
-    const Tick delta = newStart - c->timelineStart;
+    const Tick timeDelta = newStart - dragged->timelineStart;
+    const auto targets = editTargets(m_project, fromTrack, clip);  // the whole link group
+
+    auto levelOf = [this](std::size_t track, bool video) {
+        int level = 0;
+        for (std::size_t i = 0; i < track; ++i) {
+            if ((m_project.sequence().track(i).kind() == Track::Kind::Video) == video) {
+                ++level;
+            }
+        }
+        return level;
+    };
+
+    // Only the dragged clip changes track (in the timeline, video/audio move between
+    // tracks independently); linked partners keep their track and shift in time.
+    // Dragging past the outermost track creates a new one (appends don't shift
+    // existing indices, so the undo stack stays consistent).
+    if (levelDelta != 0) {
+        const bool video = m_project.sequence().track(fromTrack).kind() == Track::Kind::Video;
+        ensureTrackLevel(video, std::max(0, levelOf(fromTrack, video) + levelDelta));
+    }
 
     auto compound = std::make_unique<CompoundCommand>("Move Clip");
-    for (const auto& [track, id] : editTargets(m_project, trackIndex, clip)) {
+    for (const auto& [track, id] : targets) {
         const Clip* member = m_project.sequence().findClip(id);
-        compound->add(std::make_unique<MoveClipCommand>(track, id, track, member->timelineStart + delta));
+        if (!member) {
+            continue;
+        }
+        std::size_t toTrack = track;
+        if (id == clip && levelDelta != 0) {  // the dragged clip only
+            const bool video = m_project.sequence().track(track).kind() == Track::Kind::Video;
+            const int idx = trackIndexForLevel(video, std::max(0, levelOf(track, video) + levelDelta));
+            if (idx >= 0) {
+                toTrack = static_cast<std::size_t>(idx);
+            }
+        }
+        compound->add(std::make_unique<MoveClipCommand>(track, id, toTrack, member->timelineStart + timeDelta));
     }
 
     if (m_commands.execute(m_project, std::move(compound))) {

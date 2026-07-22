@@ -46,6 +46,7 @@ public:
     size_t trackCount() const { return m_tracks.size(); }
 
     size_t addTrack(Track::Kind kind, std::string name);
+    void removeTrackAt(size_t index);
     void clear() { m_tracks.clear(); }  // for deserialization; leaves no default tracks
 
     Tick duration() const;
