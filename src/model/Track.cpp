@@ -70,6 +70,28 @@ bool Track::setLabel(ClipId id, int label)
     return true;
 }
 
+bool Track::setTransform(ClipId id, const Transform& transform)
+{
+    const auto it = std::find_if(m_clips.begin(), m_clips.end(),
+                                 [id](const Clip& c) { return c.id == id; });
+    if (it == m_clips.end()) {
+        return false;
+    }
+    it->transform = transform;
+    return true;
+}
+
+bool Track::setAudioLevels(ClipId id, const AudioLevels& audio)
+{
+    const auto it = std::find_if(m_clips.begin(), m_clips.end(),
+                                 [id](const Clip& c) { return c.id == id; });
+    if (it == m_clips.end()) {
+        return false;
+    }
+    it->audio = audio;
+    return true;
+}
+
 const Clip* Track::clipAt(Tick time) const
 {
     for (const Clip& clip : m_clips) {

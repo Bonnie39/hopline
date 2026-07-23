@@ -366,8 +366,8 @@ private:
     }
 
     // Loose sequence scrub, composited like the preview pane: a black frame of the
-    // sequence aspect with the top clip's cached thumbnail drawn at its actual size
-    // relative to the sequence canvas. Returns false if there is nothing to show.
+    // sequence aspect with every video layer's cached thumbnail drawn bottom-to-top at
+    // its actual size relative to the sequence canvas. False if there is nothing to show.
     bool drawSequenceThumbnail(QPainter& p, const QRect& box, const QModelIndex& index, double frac) const
     {
         const Project* proj = m_owner->project();
@@ -377,41 +377,43 @@ private:
             return false;
         }
         const Tick t = static_cast<Tick>(std::llround(std::clamp(frac, 0.0, 1.0) * seq->duration()));
-        const Clip* clip = seq->topVideoClipAt(t);
-        if (!clip) {
+        const std::vector<const Clip*> layers = seq->videoClipsAt(t);
+        if (layers.empty()) {
             return false;
         }
-        const PreviewCache::Thumbnails* thumbs = m_owner->previews()->thumbnails(clip->source);
-        if (!thumbs || thumbs->images.empty()) {
-            return false;
-        }
-        int idx = 0;
-        if (thumbs->interval > 0.0) {
-            const double srcSec = secondsFromTicks(clip->sourceTimeAt(t));
-            idx = std::clamp(static_cast<int>(std::lround(srcSec / thumbs->interval)), 0,
-                             static_cast<int>(thumbs->images.size()) - 1);
-        }
-        const QImage& img = thumbs->images[idx];
 
-        // Sequence canvas within the tile, then the clip at 100% relative scale.
+        // Sequence canvas within the tile; each layer drawn at 100% relative scale.
         QSize canvas(seq->width(), seq->height());
         canvas.scale(box.size(), Qt::KeepAspectRatio);
         const QRect canvasRect(box.left() + (box.width() - canvas.width()) / 2,
                                box.top() + (box.height() - canvas.height()) / 2, canvas.width(),
                                canvas.height());
         p.fillRect(canvasRect, Qt::black);
-
-        const MediaSource* media = proj->media(clip->source);
-        const int mediaW = media && media->width > 0 ? media->width : img.width();
-        const int mediaH = media && media->height > 0 ? media->height : img.height();
         const double scale = static_cast<double>(canvasRect.width()) / seq->width();
-        const int drawW = static_cast<int>(std::lround(mediaW * scale));
-        const int drawH = static_cast<int>(std::lround(mediaH * scale));
-        const QRect target(canvasRect.center().x() - drawW / 2, canvasRect.center().y() - drawH / 2,
-                           drawW, drawH);
+
         p.save();
         p.setClipRect(canvasRect);
-        p.drawImage(target, img);
+        for (const Clip* clip : layers) {  // bottom-to-top: later layers draw over earlier
+            const PreviewCache::Thumbnails* thumbs = m_owner->previews()->thumbnails(clip->source);
+            if (!thumbs || thumbs->images.empty()) {
+                continue;
+            }
+            int idx = 0;
+            if (thumbs->interval > 0.0) {
+                const double srcSec = secondsFromTicks(clip->sourceTimeAt(t));
+                idx = std::clamp(static_cast<int>(std::lround(srcSec / thumbs->interval)), 0,
+                                 static_cast<int>(thumbs->images.size()) - 1);
+            }
+            const QImage& img = thumbs->images[idx];
+            const MediaSource* media = proj->media(clip->source);
+            const int mediaW = media && media->width > 0 ? media->width : img.width();
+            const int mediaH = media && media->height > 0 ? media->height : img.height();
+            const int drawW = static_cast<int>(std::lround(mediaW * scale));
+            const int drawH = static_cast<int>(std::lround(mediaH * scale));
+            const QRect target(canvasRect.center().x() - drawW / 2, canvasRect.center().y() - drawH / 2,
+                               drawW, drawH);
+            p.drawImage(target, img);
+        }
         p.restore();
         return true;
     }

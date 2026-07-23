@@ -55,6 +55,8 @@ Project buildProject()
     second.timelineStart = 40000;
     second.sourceIn = 5000;
     second.duration = 20000;
+    second.transform = { 0.5, 120.0, -30.0, 45.0, 0.8, BlendMode::Screen };  // exercise transform round-trip
+    second.audio = { -6.0, 0.5 };                                            // exercise audio round-trip
     stack.execute(project, std::make_unique<AddClipCommand>(0, second));
     return project;
 }
@@ -116,6 +118,14 @@ TEST_CASE("a project round-trips through serialize/deserialize", "[projectio]")
             CHECK(lc[i].duration == oc[i].duration);
             CHECK(lc[i].linkGroup == oc[i].linkGroup);
             CHECK(lc[i].label == oc[i].label);
+            CHECK(lc[i].transform.scale == oc[i].transform.scale);
+            CHECK(lc[i].transform.posX == oc[i].transform.posX);
+            CHECK(lc[i].transform.posY == oc[i].transform.posY);
+            CHECK(lc[i].transform.rotation == oc[i].transform.rotation);
+            CHECK(lc[i].transform.opacity == oc[i].transform.opacity);
+            CHECK(lc[i].transform.blend == oc[i].transform.blend);
+            CHECK(lc[i].audio.volumeDb == oc[i].audio.volumeDb);
+            CHECK(lc[i].audio.pan == oc[i].audio.pan);
         }
     }
 }

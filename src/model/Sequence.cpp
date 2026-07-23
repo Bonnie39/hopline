@@ -89,6 +89,21 @@ const Clip* Sequence::topVideoClipAt(Tick time) const
     return nullptr;
 }
 
+std::vector<const Clip*> Sequence::videoClipsAt(Tick time) const
+{
+    // Forward track order is bottom-to-top for video, matching the compositor.
+    std::vector<const Clip*> clips;
+    for (const Track& track : m_tracks) {
+        if (track.kind() != Track::Kind::Video) {
+            continue;
+        }
+        if (const Clip* clip = track.clipAt(time)) {
+            clips.push_back(clip);
+        }
+    }
+    return clips;
+}
+
 const Clip* Sequence::firstAudioClipAt(Tick time) const
 {
     for (const Track& track : m_tracks) {

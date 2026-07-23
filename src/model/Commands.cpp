@@ -163,6 +163,42 @@ void SetClipLabelCommand::undo(Project& project)
     project.sequence().track(m_track).setLabel(m_id, m_oldLabel);
 }
 
+bool SetClipTransformCommand::apply(Project& project)
+{
+    if (m_track >= project.sequence().trackCount()) {
+        return false;
+    }
+    const Clip* clip = project.sequence().track(m_track).find(m_id);
+    if (!clip) {
+        return false;
+    }
+    m_old = clip->transform;
+    return project.sequence().track(m_track).setTransform(m_id, m_transform);
+}
+
+void SetClipTransformCommand::undo(Project& project)
+{
+    project.sequence().track(m_track).setTransform(m_id, m_old);
+}
+
+bool SetClipAudioCommand::apply(Project& project)
+{
+    if (m_track >= project.sequence().trackCount()) {
+        return false;
+    }
+    const Clip* clip = project.sequence().track(m_track).find(m_id);
+    if (!clip) {
+        return false;
+    }
+    m_old = clip->audio;
+    return project.sequence().track(m_track).setAudioLevels(m_id, m_audio);
+}
+
+void SetClipAudioCommand::undo(Project& project)
+{
+    project.sequence().track(m_track).setAudioLevels(m_id, m_old);
+}
+
 bool SplitClipCommand::apply(Project& project)
 {
     Sequence& sequence = project.sequence();

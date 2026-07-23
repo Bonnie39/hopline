@@ -53,26 +53,16 @@ void PreviewWidget::paintEvent(QPaintEvent*)
     }
 
     // The sequence canvas — a black frame of the sequence aspect, letterboxed into
-    // the widget. Decoded frames are fit inside it (so a clip of a different aspect
-    // pillar/letterboxes within the canvas rather than filling the whole preview).
+    // the widget. The engine already composites all video layers onto a canvas-sized
+    // frame (clip placement/cropping happens there), so here we just fit it in.
     QSize canvas(m_canvasW, m_canvasH);
     canvas.scale(size(), Qt::KeepAspectRatio);
     const QRect canvasRect(QPoint((width() - canvas.width()) / 2, (height() - canvas.height()) / 2), canvas);
     painter.fillRect(canvasRect, Qt::black);
 
     if (!m_image.isNull()) {
-        // Render the frame at its actual size relative to the sequence canvas (100%
-        // scale, centered, cropped to the frame) — no fit-scaling. The user positions
-        // and scales clips with transform controls (not built yet).
-        const double scale = static_cast<double>(canvasRect.width()) / m_canvasW;
-        const int drawW = static_cast<int>(std::lround(m_image.width() * scale));
-        const int drawH = static_cast<int>(std::lround(m_image.height() * scale));
-        const QRect target(canvasRect.center().x() - drawW / 2, canvasRect.center().y() - drawH / 2,
-                           drawW, drawH);
-        painter.setClipRect(canvasRect);
         painter.setRenderHint(QPainter::SmoothPixmapTransform);
-        painter.drawImage(target, m_image);
-        painter.setClipping(false);
+        painter.drawImage(canvasRect, m_image);
     }
 }
 

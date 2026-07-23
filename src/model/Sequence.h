@@ -60,6 +60,9 @@ public:
     const Clip* topVideoClipAt(Tick time) const;
     const Clip* firstAudioClipAt(Tick time) const;
 
+    // Every video clip covering `time`, ordered bottom-to-top (compositing order).
+    std::vector<const Clip*> videoClipsAt(Tick time) const;
+
     // Sorted, unique clip start/end ticks across tracks of one kind. Between two
     // consecutive cut points the active clip never changes, so playback can
     // decode a whole segment without re-resolving per frame.

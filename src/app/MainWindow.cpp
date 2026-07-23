@@ -28,6 +28,7 @@
 #include "app/PreviewCache.h"
 #include "app/PreviewWidget.h"
 #include "app/SequenceDialog.h"
+#include "app/EffectControls.h"
 #include "app/TimelineScrollBar.h"
 #include "app/TimelineWidget.h"
 #include "app/ToolboxWidget.h"
@@ -40,7 +41,7 @@ namespace {
 
 // Bump when the dock set or default arrangement changes, so a stale saved layout
 // is discarded.
-constexpr int kLayoutVersion = 6;
+constexpr int kLayoutVersion = 7;  // added the Effect Controls dock
 
 // Transport time readout: M:SS.CC.
 QString formatClock(double seconds)
@@ -167,6 +168,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_timeline, &TimelineWidget::deleteTrackRequested, this, &MainWindow::onDeleteTrack);
     connect(m_timeline, &TimelineWidget::selectionChanged, this, [this](ClipId clip) {
         statusBar()->showMessage(clip ? QString("Selected clip %1").arg(clip) : QString("Ready"));
+        updateEffectPanel(clip);
     });
     connect(m_timeline, &TimelineWidget::mediaDropped, this, &MainWindow::onMediaDropped);
     connect(m_timeline, &TimelineWidget::fileDropped, this, &MainWindow::onFileDropped);
@@ -261,6 +263,65 @@ MainWindow::MainWindow(QWidget* parent)
     m_meterDock->setObjectName("levelsDock");
     m_meterDock->setWidget(m_meter);
 
+    m_effects = new EffectControls(this);
+    m_effectsDock = new QDockWidget("Effect Controls", this);
+    m_effectsDock->setObjectName("effectsDock");
+    m_effectsDock->setWidget(m_effects);
+    connect(m_effects, &EffectControls::transformEdited, this, [this](const Transform& t, bool committing) {
+        if (m_fxVideoClip == kInvalidClip) {
+            return;
+        }
+        if (!m_fxTransformEditing) {  // capture the pre-drag value once
+            m_fxTransformEditing = true;
+            const Clip* c = m_project.sequence().findClip(m_fxVideoClip);
+            m_fxTransformBaseline = c ? c->transform : Transform{};
+        }
+        if (!committing) {
+            // Live preview: mutate directly and re-composite the current frame.
+            m_project.sequence().track(m_fxVideoTrack).setTransform(m_fxVideoClip, t);
+            if (m_player) {
+                m_player->refresh(m_project);
+            }
+            return;
+        }
+        m_fxTransformEditing = false;
+        // Restore the baseline, then record the whole drag as one undoable command.
+        m_project.sequence().track(m_fxVideoTrack).setTransform(m_fxVideoClip, m_fxTransformBaseline);
+        if (t != m_fxTransformBaseline
+            && m_commands.execute(m_project,
+                                  std::make_unique<SetClipTransformCommand>(m_fxVideoTrack, m_fxVideoClip, t))) {
+            commitEdit();
+        } else if (m_player) {
+            m_player->refresh(m_project);  // no net change; just settle the preview
+        }
+    });
+    connect(m_effects, &EffectControls::audioEdited, this, [this](const AudioLevels& a, bool committing) {
+        if (m_fxAudioClip == kInvalidClip) {
+            return;
+        }
+        if (!m_fxAudioEditing) {
+            m_fxAudioEditing = true;
+            const Clip* c = m_project.sequence().findClip(m_fxAudioClip);
+            m_fxAudioBaseline = c ? c->audio : AudioLevels{};
+        }
+        if (!committing) {
+            m_project.sequence().track(m_fxAudioTrack).setAudioLevels(m_fxAudioClip, a);
+            if (m_player) {
+                m_player->refresh(m_project);
+            }
+            return;
+        }
+        m_fxAudioEditing = false;
+        m_project.sequence().track(m_fxAudioTrack).setAudioLevels(m_fxAudioClip, m_fxAudioBaseline);
+        if (a != m_fxAudioBaseline
+            && m_commands.execute(m_project,
+                                  std::make_unique<SetClipAudioCommand>(m_fxAudioTrack, m_fxAudioClip, a))) {
+            commitEdit();
+        } else if (m_player) {
+            m_player->refresh(m_project);
+        }
+    });
+
     m_toolbox = new ToolboxWidget(this);
     m_toolsDock = new QDockWidget("Tools", this);
     m_toolsDock->setObjectName("toolsDock");
@@ -303,6 +364,7 @@ MainWindow::MainWindow(QWidget* parent)
     windowMenu->addAction("&Reset Layout", this, &MainWindow::resetLayout);
     windowMenu->addSeparator();
     // Checkable toggles for each panel.
+    windowMenu->addAction(m_effectsDock->toggleViewAction());
     windowMenu->addAction(m_browserDock->toggleViewAction());
     windowMenu->addAction(m_toolsDock->toggleViewAction());
     windowMenu->addAction(m_timelineDock->toggleViewAction());
@@ -323,10 +385,13 @@ MainWindow::~MainWindow() = default;
 
 void MainWindow::applyDefaultLayout()
 {
-    // The bottom row owns the bottom-right corner, so the Levels meter can sit
-    // right of the timeline while Media Info stays in the top-right only.
+    // The bottom row owns both bottom corners, so it spans the full width while the
+    // Effect Controls dock stays in the upper-left (left of the preview) and Media
+    // Info stays top-right.
     setCorner(Qt::BottomRightCorner, Qt::BottomDockWidgetArea);
+    setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
 
+    addDockWidget(Qt::LeftDockWidgetArea, m_effectsDock);  // upper-left, next to the preview
     addDockWidget(Qt::BottomDockWidgetArea, m_browserDock);
     addDockWidget(Qt::BottomDockWidgetArea, m_toolsDock);
     addDockWidget(Qt::BottomDockWidgetArea, m_timelineDock);
@@ -337,7 +402,8 @@ void MainWindow::applyDefaultLayout()
     splitDockWidget(m_toolsDock, m_timelineDock, Qt::Horizontal);
     splitDockWidget(m_timelineDock, m_meterDock, Qt::Horizontal);
 
-    for (QDockWidget* dock : { m_browserDock, m_toolsDock, m_timelineDock, m_logDock, m_meterDock }) {
+    for (QDockWidget* dock :
+         { m_effectsDock, m_browserDock, m_toolsDock, m_timelineDock, m_logDock, m_meterDock }) {
         dock->setFloating(false);
         dock->show();
     }
@@ -345,6 +411,7 @@ void MainWindow::applyDefaultLayout()
     const int w = width() > 100 ? width() : 1600;
     resizeDocks({ m_browserDock, m_toolsDock, m_timelineDock, m_meterDock }, { 300, 42, w - 412, 70 },
                 Qt::Horizontal);
+    resizeDocks({ m_effectsDock }, { 300 }, Qt::Horizontal);
     resizeDocks({ m_browserDock, m_timelineDock }, { 440, 440 }, Qt::Vertical);  // taller timeline (fits 3+3 tracks)
 }
 
@@ -842,6 +909,54 @@ std::vector<std::pair<std::size_t, ClipId>> editTargets(const Project& project, 
 }
 
 }  // namespace
+
+void MainWindow::updateEffectPanel(ClipId clip)
+{
+    m_fxVideoClip = kInvalidClip;
+    m_fxAudioClip = kInvalidClip;
+
+    std::size_t selTrack = 0;
+    const Clip* sel = (clip != kInvalidClip && m_project.hasActiveSequence())
+                          ? m_project.sequence().findClip(clip, &selTrack)
+                          : nullptr;
+    if (!sel) {
+        m_effects->showNone();
+        return;
+    }
+
+    // A linked V+A pair shows both sections; each edit targets its own half.
+    const Sequence& seq = m_project.sequence();
+    std::vector<std::pair<std::size_t, ClipId>> members;
+    if (sel->linked()) {
+        members = seq.clipsInGroup(sel->linkGroup);
+    } else {
+        members = { { selTrack, clip } };
+    }
+
+    const Clip* videoClip = nullptr;
+    const Clip* audioClip = nullptr;
+    for (const auto& [track, id] : members) {
+        const Clip* c = seq.track(track).find(id);
+        if (!c) {
+            continue;
+        }
+        if (seq.track(track).kind() == Track::Kind::Video) {
+            videoClip = c;
+            m_fxVideoTrack = track;
+            m_fxVideoClip = id;
+        } else {
+            audioClip = c;
+            m_fxAudioTrack = track;
+            m_fxAudioClip = id;
+        }
+    }
+
+    if (!videoClip && !audioClip) {
+        m_effects->showNone();
+    } else {
+        m_effects->showClip(videoClip, audioClip, seq.width(), seq.height());
+    }
+}
 
 void MainWindow::commitEdit()
 {

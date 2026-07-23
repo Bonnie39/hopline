@@ -4,6 +4,10 @@ qt_add_executable(hopline
     app/MainWindow.h
     app/AudioMeter.cpp
     app/AudioMeter.h
+    app/DragValue.cpp
+    app/DragValue.h
+    app/EffectControls.cpp
+    app/EffectControls.h
     app/IconButton.cpp
     app/IconButton.h
     app/MediaBrowser.cpp

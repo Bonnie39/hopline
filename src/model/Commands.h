@@ -136,6 +136,48 @@ private:
     int m_oldLabel = 0;
 };
 
+// Sets a video clip's Transform effect. Undo restores the previous transform.
+class SetClipTransformCommand : public Command {
+public:
+    SetClipTransformCommand(size_t trackIndex, ClipId id, const Transform& transform)
+        : m_track(trackIndex)
+        , m_id(id)
+        , m_transform(transform)
+    {
+    }
+
+    bool apply(Project& project) override;
+    void undo(Project& project) override;
+    std::string name() const override { return "Transform"; }
+
+private:
+    size_t m_track;
+    ClipId m_id;
+    Transform m_transform;
+    Transform m_old;
+};
+
+// Sets an audio clip's Volume Controls (gain + pan). Undo restores the previous.
+class SetClipAudioCommand : public Command {
+public:
+    SetClipAudioCommand(size_t trackIndex, ClipId id, const AudioLevels& audio)
+        : m_track(trackIndex)
+        , m_id(id)
+        , m_audio(audio)
+    {
+    }
+
+    bool apply(Project& project) override;
+    void undo(Project& project) override;
+    std::string name() const override { return "Volume"; }
+
+private:
+    size_t m_track;
+    ClipId m_id;
+    AudioLevels m_audio;
+    AudioLevels m_old;
+};
+
 // Splits at a timeline instant; the right-hand piece gets a fresh id.
 class SplitClipCommand : public Command {
 public:

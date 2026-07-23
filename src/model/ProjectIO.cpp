@@ -10,7 +10,7 @@
 namespace hopline {
 namespace {
 
-constexpr int kFormatVersion = 4;
+constexpr int kFormatVersion = 5;  // v5 added per-clip transform + audio effects
 
 using nlohmann::json;
 
@@ -51,6 +51,11 @@ json clipToJson(const Clip& c)
         { "id", c.id }, { "source", c.source }, { "timelineStart", c.timelineStart },
         { "sourceIn", c.sourceIn }, { "duration", c.duration }, { "linkGroup", c.linkGroup },
         { "label", c.label },
+        { "transform",
+          { { "scale", c.transform.scale }, { "posX", c.transform.posX }, { "posY", c.transform.posY },
+            { "rotation", c.transform.rotation }, { "opacity", c.transform.opacity },
+            { "blend", static_cast<int>(c.transform.blend) } } },
+        { "audio", { { "volumeDb", c.audio.volumeDb }, { "pan", c.audio.pan } } },
     };
 }
 
@@ -64,6 +69,18 @@ Clip clipFromJson(const json& j)
     c.duration = j.at("duration").get<Tick>();
     c.linkGroup = j.value("linkGroup", kNoLink);
     c.label = j.value("label", 0);
+    if (const auto t = j.find("transform"); t != j.end()) {
+        c.transform.scale = t->value("scale", 1.0);
+        c.transform.posX = t->value("posX", 0.0);
+        c.transform.posY = t->value("posY", 0.0);
+        c.transform.rotation = t->value("rotation", 0.0);
+        c.transform.opacity = t->value("opacity", 1.0);
+        c.transform.blend = static_cast<BlendMode>(t->value("blend", 0));
+    }
+    if (const auto a = j.find("audio"); a != j.end()) {
+        c.audio.volumeDb = a->value("volumeDb", 0.0);
+        c.audio.pan = a->value("pan", 0.0);
+    }
     return c;
 }
 

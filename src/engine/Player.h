@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -43,6 +44,11 @@ public:
     // model change reaches playback.
     void reload(const Project& project);
 
+    // Like reload, but for an **effect-only** change (transform/volume): keeps the
+    // decoders and their buffered frames so the current frame re-composites without
+    // reseeking. Cheap enough for live scrubbing of the Effect Controls.
+    void refresh(const Project& project);
+
     // Pulls every frame now due, returning the newest in `out`. Late frames are
     // dropped rather than shown behind the clock. False if nothing is due yet.
     bool update(VideoFrame& out);
@@ -58,26 +64,27 @@ public:
     int underruns() const { return m_audioOut.underruns(); }
 
 private:
+    // Decoders (one per track) held across seeks so scrubbing reseeks rather than
+    // reopening. Defined in the .cpp; only ever touched while the decode threads are
+    // stopped, or from the decode threads themselves.
+    struct DecodeState;
+
     void videoLoop();
     void audioLoop();
     void startThreads();
     void stopThreads();
 
     void restartAt(Tick target, bool resumePlaying);
-    bool ensureVideoSource(MediaId id);
-    bool decodeVideoSegment(const Clip& clip, Tick segStart, Tick segEnd);
-    bool emitBlackRange(Tick from, Tick to);
     Tick nextCut(const std::vector<Tick>& cuts, Tick after, Tick fallback) const;
 
     Sequence m_seq;
     std::unordered_map<MediaId, std::string> m_paths;
 
-    VideoDecoder m_video;
     AudioOutput m_audioOut;
     FrameQueue m_queue;
     Clock m_clock;
+    std::unique_ptr<DecodeState> m_decode;
 
-    MediaId m_curVideoSource = kInvalidMedia;
     Tick m_startTick = 0;
 
     std::thread m_videoThread;

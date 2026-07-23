@@ -37,6 +37,9 @@ public:
     bool setLinkGroup(ClipId id, LinkGroup group);
     // Label is cosmetic, so like the link group it's safe to change in place.
     bool setLabel(ClipId id, int label);
+    // Effects don't affect ordering/overlap either, so they change in place too.
+    bool setTransform(ClipId id, const Transform& transform);
+    bool setAudioLevels(ClipId id, const AudioLevels& audio);
 
     // Whether `range` would fit, ignoring the clip being moved or trimmed.
     bool isFree(const TimeRange& range, ClipId ignore = kInvalidClip) const;

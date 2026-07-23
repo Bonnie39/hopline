@@ -24,6 +24,7 @@ class MediaBrowser;
 class IconButton;
 class AudioMeter;
 class ToolboxWidget;
+class EffectControls;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -82,6 +83,7 @@ private:
     void activateSequence(SequenceId sequence);
     SequenceId ensureActiveSequence(const MediaSource& source);
     void seedTracks(SequenceId sequence);  // pad a new sequence to 3 video + 3 audio tracks
+    void updateEffectPanel(ClipId clip);   // show the selected clip's Transform / Volume effect
     int trackIndexForLevel(bool video, int level);
     void ensureTrackLevel(bool video, int level);
     void syncSequenceTabs();
@@ -99,6 +101,19 @@ private:
     MediaBrowser* m_browser = nullptr;
     AudioMeter* m_meter = nullptr;
     ToolboxWidget* m_toolbox = nullptr;
+    EffectControls* m_effects = nullptr;
+    QDockWidget* m_effectsDock = nullptr;
+    // The clips the Effect Controls panel currently edits (a linked pair may set both).
+    std::size_t m_fxVideoTrack = 0;
+    ClipId m_fxVideoClip = kInvalidClip;
+    std::size_t m_fxAudioTrack = 0;
+    ClipId m_fxAudioClip = kInvalidClip;
+    // Live-scrub state: baseline captured at the start of a drag so the whole drag
+    // becomes a single undo step on commit.
+    bool m_fxTransformEditing = false;
+    Transform m_fxTransformBaseline;
+    bool m_fxAudioEditing = false;
+    AudioLevels m_fxAudioBaseline;
     QDockWidget* m_browserDock = nullptr;
     QDockWidget* m_timelineDock = nullptr;
     QDockWidget* m_logDock = nullptr;
