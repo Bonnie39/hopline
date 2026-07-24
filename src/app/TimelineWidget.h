@@ -52,6 +52,8 @@ public:
 
 signals:
     void playheadDragged(Tick time);
+    void scrubStarted();  // ruler press: begin a playhead scrub gesture
+    void scrubEnded();    // ruler release: end it
     void viewChanged();  // scroll or zoom changed (for the scroll bar to track)
     void selectionChanged(ClipId clip);
     void clipMoved(std::size_t fromTrack, ClipId clip, int levelDelta, Tick newStart);

@@ -108,12 +108,10 @@ private:
     ClipId m_fxVideoClip = kInvalidClip;
     std::size_t m_fxAudioTrack = 0;
     ClipId m_fxAudioClip = kInvalidClip;
-    // Live-scrub state: baseline captured at the start of a drag so the whole drag
-    // becomes a single undo step on commit.
+    // Live transform-scrub state: baseline captured at drag start so the whole drag
+    // becomes a single undo step on commit. Audio commits on release (no live preview).
     bool m_fxTransformEditing = false;
     Transform m_fxTransformBaseline;
-    bool m_fxAudioEditing = false;
-    AudioLevels m_fxAudioBaseline;
     QDockWidget* m_browserDock = nullptr;
     QDockWidget* m_timelineDock = nullptr;
     QDockWidget* m_logDock = nullptr;
@@ -126,6 +124,7 @@ private:
     QString m_projectPath;
     bool m_layoutRestored = false;
     bool m_wasPlaying = false;
+    bool m_scrubbing = false;  // dragging the timeline playhead (on-demand recomposite)
 };
 
 }  // namespace hopline

@@ -93,9 +93,10 @@ bool AudioOutput::open(int sampleRate, int channels, std::string& error)
     m_latencyFrames = m_device->handle.playback.internalPeriodSizeInFrames
         * m_device->handle.playback.internalPeriods;
 
-    // ~1s of slack: deep enough to ride out decode hitches, short enough that
-    // pausing doesn't leave a long tail of stale audio queued.
-    m_buffer.resize(static_cast<size_t>(m_sampleRate) * m_channels);
+    // Ring capacity. The audio thread caps how full it actually keeps this (see
+    // kAudioLookaheadMs in Player.cpp) — that cap, not this capacity, sets the
+    // look-ahead latency; the capacity just needs comfortable headroom above it.
+    m_buffer.resize(static_cast<size_t>(m_sampleRate) * m_channels / 2);
     resetPosition();
 
     m_paused.store(true, std::memory_order_release);

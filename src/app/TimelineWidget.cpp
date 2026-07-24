@@ -619,6 +619,7 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event)
 
     if (hit.onRuler) {
         m_drag = Drag::Scrub;
+        emit scrubStarted();  // before scrubTo emits the first playheadDragged
         scrubTo(pos.x());
         return;
     }
@@ -757,6 +758,9 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event)
     const bool moved = m_previewDelta != 0 || (m_drag == Drag::Move && m_dragLevelDelta != 0);
     if (m_drag != Drag::None && m_drag != Drag::Scrub && m_dragMoved && moved) {
         commitDrag();
+    }
+    if (m_drag == Drag::Scrub) {
+        emit scrubEnded();
     }
 
     m_drag = Drag::None;

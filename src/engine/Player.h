@@ -6,6 +6,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 #include "engine/AudioOutput.h"
 #include "engine/Clock.h"
@@ -44,10 +45,26 @@ public:
     // model change reaches playback.
     void reload(const Project& project);
 
-    // Like reload, but for an **effect-only** change (transform/volume): keeps the
-    // decoders and their buffered frames so the current frame re-composites without
-    // reseeking. Cheap enough for live scrubbing of the Effect Controls.
-    void refresh(const Project& project);
+    // Live Effect-Controls preview without restarting the decode threads per drag:
+    // beginPreview() idles the threads and captures the playhead's video source frames;
+    // previewComposite() then re-composites them with the project's current transforms
+    // (on the caller's thread) as fast as the user drags. End the preview with reload().
+    void beginPreview();
+    const VideoFrame& previewComposite(const Project& project);
+
+    // Live audio (Volume Controls) preview: while set, the audio thread reads these
+    // gains for `clip` instead of its committed levels — so a volume/pan drag is heard
+    // live during playback without restarting the audio thread. Clear on commit.
+    void setAudioPreview(ClipId clip, const AudioLevels& levels);
+    void clearAudioPreview() { m_previewAudioClip.store(0, std::memory_order_relaxed); }
+
+    // Timeline scrubbing without restarting the decode threads per move: beginScrub()
+    // idles the threads once; scrubComposite(t) reseeks (or decodes forward) each active
+    // video layer to t and composites the frame on the caller's thread; endScrub()
+    // restarts normal playback at the final position.
+    void beginScrub();
+    const VideoFrame& scrubComposite(Tick t);
+    void endScrub();
 
     // Pulls every frame now due, returning the newest in `out`. Late frames are
     // dropped rather than shown behind the clock. False if nothing is due yet.
@@ -77,8 +94,24 @@ private:
     void restartAt(Tick target, bool resumePlaying);
     Tick nextCut(const std::vector<Tick>& cuts, Tick after, Tick fallback) const;
 
+    // A captured playhead video frame + which clip it belongs to (bottom-to-top),
+    // used to re-composite live during an Effect Controls drag.
+    struct PreviewFrame {
+        ClipId clip = kInvalidClip;
+        VideoFrame frame;
+    };
+
     Sequence m_seq;
     std::unordered_map<MediaId, std::string> m_paths;
+    std::vector<PreviewFrame> m_previewLayers;
+    VideoFrame m_previewCanvas;
+    Tick m_previewTick = 0;
+    bool m_scrubbing = false;
+
+    // Live audio preview override, read lock-free by the audio thread.
+    std::atomic<uint64_t> m_previewAudioClip{ 0 };
+    std::atomic<float> m_previewGainL{ 1.0f };
+    std::atomic<float> m_previewGainR{ 1.0f };
 
     AudioOutput m_audioOut;
     FrameQueue m_queue;

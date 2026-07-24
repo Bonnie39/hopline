@@ -159,6 +159,18 @@ MainWindow::MainWindow(QWidget* parent)
     m_timeline->setProject(&m_project);
     m_timeline->setPreviewCache(m_previews.get());
     connect(m_timeline, &TimelineWidget::playheadDragged, this, &MainWindow::timelineScrubbed);
+    connect(m_timeline, &TimelineWidget::scrubStarted, this, [this] {
+        m_scrubbing = true;
+        if (m_player) {
+            m_player->beginScrub();  // idle decode threads for on-demand scrub
+        }
+    });
+    connect(m_timeline, &TimelineWidget::scrubEnded, this, [this] {
+        m_scrubbing = false;
+        if (m_player) {
+            m_player->endScrub();  // resume normal playback at the scrub position
+        }
+    });
     connect(m_timeline, &TimelineWidget::clipMoved, this, &MainWindow::onClipMoved);
     connect(m_timeline, &TimelineWidget::clipTrimmed, this, &MainWindow::onClipTrimmed);
     connect(m_timeline, &TimelineWidget::unlinkRequested, this, &MainWindow::onUnlink);
@@ -271,16 +283,19 @@ MainWindow::MainWindow(QWidget* parent)
         if (m_fxVideoClip == kInvalidClip) {
             return;
         }
-        if (!m_fxTransformEditing) {  // capture the pre-drag value once
+        if (!m_fxTransformEditing) {  // start of an interaction: capture baseline
             m_fxTransformEditing = true;
             const Clip* c = m_project.sequence().findClip(m_fxVideoClip);
             m_fxTransformBaseline = c ? c->transform : Transform{};
+            if (!committing && m_player) {
+                m_player->beginPreview();  // idle threads + capture playhead frames (a drag)
+            }
         }
         if (!committing) {
-            // Live preview: mutate directly and re-composite the current frame.
+            // Live preview: mutate directly and re-composite on the UI thread (no thread churn).
             m_project.sequence().track(m_fxVideoTrack).setTransform(m_fxVideoClip, t);
             if (m_player) {
-                m_player->refresh(m_project);
+                m_preview->setFrame(m_player->previewComposite(m_project));
             }
             return;
         }
@@ -290,35 +305,28 @@ MainWindow::MainWindow(QWidget* parent)
         if (t != m_fxTransformBaseline
             && m_commands.execute(m_project,
                                   std::make_unique<SetClipTransformCommand>(m_fxVideoTrack, m_fxVideoClip, t))) {
-            commitEdit();
+            commitEdit();  // reload restarts the decode threads, ending the preview
         } else if (m_player) {
-            m_player->refresh(m_project);  // no net change; just settle the preview
+            m_player->reload(m_project);  // no net change: restart threads to end preview
         }
     });
     connect(m_effects, &EffectControls::audioEdited, this, [this](const AudioLevels& a, bool committing) {
         if (m_fxAudioClip == kInvalidClip) {
             return;
         }
-        if (!m_fxAudioEditing) {
-            m_fxAudioEditing = true;
-            const Clip* c = m_project.sequence().findClip(m_fxAudioClip);
-            m_fxAudioBaseline = c ? c->audio : AudioLevels{};
-        }
         if (!committing) {
-            m_project.sequence().track(m_fxAudioTrack).setAudioLevels(m_fxAudioClip, a);
+            // Live: the audio thread reads these gains for the clip (heard live while playing).
             if (m_player) {
-                m_player->refresh(m_project);
+                m_player->setAudioPreview(m_fxAudioClip, a);
             }
             return;
         }
-        m_fxAudioEditing = false;
-        m_project.sequence().track(m_fxAudioTrack).setAudioLevels(m_fxAudioClip, m_fxAudioBaseline);
-        if (a != m_fxAudioBaseline
-            && m_commands.execute(m_project,
-                                  std::make_unique<SetClipAudioCommand>(m_fxAudioTrack, m_fxAudioClip, a))) {
+        if (m_player) {
+            m_player->clearAudioPreview();
+        }
+        if (m_commands.execute(m_project,
+                               std::make_unique<SetClipAudioCommand>(m_fxAudioTrack, m_fxAudioClip, a))) {
             commitEdit();
-        } else if (m_player) {
-            m_player->refresh(m_project);
         }
     });
 
@@ -886,10 +894,16 @@ void MainWindow::onDeleteTrack(std::size_t trackIndex)
 
 void MainWindow::timelineScrubbed(Tick time)
 {
-    if (m_player) {
-        m_player->seek(secondsFromTicks(time));
+    if (!m_player) {
+        return;
     }
-    // Scrubbing into empty space (no video at `time`) shows black, not a stale frame.
+    if (m_scrubbing) {
+        // On-demand: decode + composite the frame at `time` without restarting threads.
+        m_preview->setFrame(m_player->scrubComposite(time));
+        return;
+    }
+    // Programmatic playhead move (not a ruler drag): a normal seek.
+    m_player->seek(secondsFromTicks(time));
     const Sequence* s = m_project.activeSequence();
     if (!s || !s->topVideoClipAt(time)) {
         m_preview->clear();

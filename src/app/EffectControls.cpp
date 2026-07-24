@@ -1,5 +1,7 @@
 #include "app/EffectControls.h"
 
+#include <functional>
+
 #include <QComboBox>
 #include <QFormLayout>
 #include <QFrame>
@@ -7,6 +9,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QScrollArea>
+#include <QToolButton>
 #include <QVBoxLayout>
 
 #include "app/DragValue.h"
@@ -67,12 +70,33 @@ EffectControls::EffectControls(QWidget* parent)
     posRow->setSpacing(10);
     posRow->addWidget(m_posX);
     posRow->addWidget(m_posY);
-    posRow->addStretch();
 
-    tf->addRow("Position", pos);
-    tf->addRow("Scale", m_scale);
-    tf->addRow("Rotation", m_rotation);
-    tf->addRow("Opacity", m_opacity);
+    // Each row gets a reset-to-default button on the far right (blend mode excepted).
+    auto resettable = [this](QWidget* field, std::function<void()> onReset) -> QWidget* {
+        auto* w = new QWidget;
+        auto* h = new QHBoxLayout(w);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(4);
+        h->addWidget(field);
+        h->addStretch();
+        auto* reset = new QToolButton;
+        reset->setText(QString::fromUtf8("\xE2\x86\xBA"));  // ↺
+        reset->setToolTip("Reset to default");
+        reset->setAutoRaise(true);
+        reset->setFocusPolicy(Qt::NoFocus);
+        connect(reset, &QToolButton::clicked, this, onReset);
+        h->addWidget(reset);
+        return w;
+    };
+
+    tf->addRow("Position", resettable(pos, [this] {
+        m_posX->setValue(m_canvasW / 2.0);
+        m_posY->setValue(m_canvasH / 2.0);
+        emitTransform(true);
+    }));
+    tf->addRow("Scale", resettable(m_scale, [this] { m_scale->setValue(100.0); emitTransform(true); }));
+    tf->addRow("Rotation", resettable(m_rotation, [this] { m_rotation->setValue(0.0); emitTransform(true); }));
+    tf->addRow("Opacity", resettable(m_opacity, [this] { m_opacity->setValue(100.0); emitTransform(true); }));
     tf->addRow("Blend Mode", m_blend);
     v->addWidget(m_transformBox);
 
@@ -88,8 +112,8 @@ EffectControls::EffectControls(QWidget* parent)
     m_volume = makeValue(-60.0, 12.0, 0.1, 1, " dB");
     m_pan = makeValue(-100.0, 100.0, 1.0, 0, "");
     m_pan->setToolTip("-100 = full left, +100 = full right");
-    av->addRow("Volume", m_volume);
-    av->addRow("Pan (L/R)", m_pan);
+    av->addRow("Volume", resettable(m_volume, [this] { m_volume->setValue(0.0); emitAudio(true); }));
+    av->addRow("Pan (L/R)", resettable(m_pan, [this] { m_pan->setValue(0.0); emitAudio(true); }));
     v->addWidget(m_audioBox);
 
     for (DragValue* box : { m_volume, m_pan }) {

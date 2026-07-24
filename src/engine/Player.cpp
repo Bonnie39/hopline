@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <execution>
+#include <numeric>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -18,6 +20,11 @@ constexpr size_t kQueueDepth = 8;
 constexpr int kSampleRate = 48000;
 constexpr int kChannels = 2;
 constexpr int64_t kMixChunkFrames = 1024;
+// How far ahead the audio thread mixes into the ring. This is the ceiling on how long
+// a live Volume/Pan change takes to reach the speakers (a gain edit only affects freshly
+// mixed chunks; they sit behind whatever is already queued). Small for responsive live
+// audio; still well above a per-clip reseek at a cut. Raise if you hear underruns.
+constexpr int kAudioLookaheadMs = 150;
 
 using namespace std::chrono_literals;
 
@@ -62,6 +69,27 @@ void blitCentered(VideoFrame& canvas, const VideoFrame& src)
                     &src.rgba[(static_cast<size_t>(sy) * sw + sx0) * 4],
                     static_cast<size_t>(sx1 - sx0) * 4);
     }
+}
+
+// Reset a frame buffer to opaque black at the given size (reusing its allocation).
+void fillBlack(VideoFrame& f, int cw, int ch, double pts)
+{
+    f.width = cw;
+    f.height = ch;
+    f.pts = pts;
+    f.rgba.assign(static_cast<size_t>(cw) * ch * 4, 0);
+    for (size_t i = 3; i < f.rgba.size(); i += 4) {
+        f.rgba[i] = 255;
+    }
+}
+
+// Volume Controls → per-channel linear gain (dB gain + balance pan).
+void computeGains(const AudioLevels& lv, float& gainL, float& gainR)
+{
+    const double gain = std::pow(10.0, lv.volumeDb / 20.0);
+    const double pan = std::clamp(lv.pan, -1.0, 1.0);
+    gainL = static_cast<float>(gain * (pan > 0.0 ? 1.0 - pan : 1.0));
+    gainR = static_cast<float>(gain * (pan < 0.0 ? 1.0 + pan : 1.0));
 }
 
 // Photoshop-style per-channel blend of a source value over a base (all 0..255).
@@ -131,7 +159,9 @@ void blitTransformed(VideoFrame& canvas, const VideoFrame& src, const Transform&
     const double invS = 1.0 / s;
     const double a = std::clamp(tf.opacity, 0.0, 1.0);
     const BlendMode mode = tf.blend;
-    for (int y = y0; y < y1; ++y) {
+    uint8_t* const dst = canvas.rgba.data();
+    const uint8_t* const srcData = src.rgba.data();
+    auto renderRow = [&](int y) {
         for (int x = x0; x < x1; ++x) {
             const double rx = x + 0.5 - ccx, ry = y + 0.5 - ccy;
             const double sxf = (cosr * rx + sinr * ry) * invS + scx;   // inverse rotate/scale
@@ -143,11 +173,11 @@ void blitTransformed(VideoFrame& canvas, const VideoFrame& src, const Transform&
             const int sx0 = static_cast<int>(sxf), sy0 = static_cast<int>(syf);
             const int sx1 = std::min(sx0 + 1, sw - 1), sy1 = std::min(sy0 + 1, sh - 1);
             const double fx = sxf - sx0, fy = syf - sy0;
-            const uint8_t* p00 = &src.rgba[(static_cast<size_t>(sy0) * sw + sx0) * 4];
-            const uint8_t* p10 = &src.rgba[(static_cast<size_t>(sy0) * sw + sx1) * 4];
-            const uint8_t* p01 = &src.rgba[(static_cast<size_t>(sy1) * sw + sx0) * 4];
-            const uint8_t* p11 = &src.rgba[(static_cast<size_t>(sy1) * sw + sx1) * 4];
-            uint8_t* cp = &canvas.rgba[(static_cast<size_t>(y) * cw + x) * 4];
+            const uint8_t* p00 = &srcData[(static_cast<size_t>(sy0) * sw + sx0) * 4];
+            const uint8_t* p10 = &srcData[(static_cast<size_t>(sy0) * sw + sx1) * 4];
+            const uint8_t* p01 = &srcData[(static_cast<size_t>(sy1) * sw + sx0) * 4];
+            const uint8_t* p11 = &srcData[(static_cast<size_t>(sy1) * sw + sx1) * 4];
+            uint8_t* cp = &dst[(static_cast<size_t>(y) * cw + x) * 4];
             for (int c = 0; c < 3; ++c) {
                 const double top = p00[c] * (1 - fx) + p10[c] * fx;
                 const double bot = p01[c] * (1 - fx) + p11[c] * fx;
@@ -155,6 +185,18 @@ void blitTransformed(VideoFrame& canvas, const VideoFrame& src, const Transform&
                 const int blended = blendChannel(mode, cp[c], sv);
                 cp[c] = static_cast<uint8_t>(a >= 1.0 ? blended : std::lround(cp[c] * (1 - a) + blended * a));
             }
+        }
+    };
+
+    // Rows are disjoint in the canvas, so parallelize across cores when the work is
+    // large enough to be worth the dispatch overhead.
+    if (static_cast<long long>(y1 - y0) * (x1 - x0) > 150000) {
+        std::vector<int> rows(static_cast<size_t>(y1 - y0));
+        std::iota(rows.begin(), rows.end(), y0);
+        std::for_each(std::execution::par, rows.begin(), rows.end(), renderRow);
+    } else {
+        for (int y = y0; y < y1; ++y) {
+            renderRow(y);
         }
     }
 }
@@ -171,6 +213,7 @@ struct VideoLayer {
     Transform transform;  // the clip's Transform effect, refreshed when the clip loads
 
     VideoFrame current;
+    Tick currentPts = 0;  // timeline pts of `current` (for forward-scrub decisions)
     bool hasCurrent = false;
     VideoFrame pending;
     Tick pendingPts = 0;
@@ -204,6 +247,7 @@ struct VideoLayer {
             }
             if (pendingPts <= t) {
                 current = std::move(pending);
+                currentPts = pendingPts;
                 hasCurrent = true;
                 hasPending = false;
             } else {
@@ -216,6 +260,7 @@ struct VideoLayer {
         // otherwise a seek intermittently loses a layer (black / lower-track only).
         if (!hasCurrent && hasPending) {
             current = std::move(pending);
+            currentPts = pendingPts;
             hasCurrent = true;
             hasPending = false;
         }
@@ -466,9 +511,16 @@ void Player::audioLoop()
     // own length (starting from 0 would misalign audio past the first cut).
     int64_t framesWritten = std::llround(secondsFromTicks(m_startTick) * kSampleRate);
 
+    // Cap the queued audio so a live gain change (applied to freshly mixed chunks)
+    // isn't stuck behind a full ring — it reaches the device within ~kAudioLookaheadMs.
+    const size_t targetFill = static_cast<size_t>(kSampleRate) * kChannels * kAudioLookaheadMs / 1000;
     auto writeFloats = [&](const float* data, size_t count) {
         size_t off = 0;
         while (off < count && !m_stop) {
+            if (m_audioOut.buffer().available() >= targetFill) {
+                std::this_thread::sleep_for(2ms);  // enough queued; don't run further ahead
+                continue;
+            }
             const size_t w = m_audioOut.buffer().write(data + off, count - off);
             off += w;
             if (w == 0) {
@@ -517,12 +569,7 @@ void Player::audioLoop()
                 tm.resetStream();
                 tm.loaded = clip->id;
             }
-            // Volume Controls → per-channel gain (balance pan). Refreshed each load,
-            // so effect edits (which come through a reload) take hold.
-            const double gain = std::pow(10.0, clip->audio.volumeDb / 20.0);
-            const double pan = std::clamp(clip->audio.pan, -1.0, 1.0);
-            tm.gainL = static_cast<float>(gain * (pan > 0.0 ? 1.0 - pan : 1.0));
-            tm.gainR = static_cast<float>(gain * (pan < 0.0 ? 1.0 + pan : 1.0));
+            computeGains(clip->audio, tm.gainL, tm.gainR);  // refreshed each load (effect edits reload)
             if (tm.decoder.isOpen()) {
                 active.push_back(&tm);
             }
@@ -533,7 +580,12 @@ void Player::audioLoop()
         while (framesWritten < target && !m_stop) {
             const int64_t want = std::min<int64_t>(kMixChunkFrames, target - framesWritten);
             mix.assign(static_cast<size_t>(want) * kChannels, 0.0f);
+            const uint64_t pvClip = m_previewAudioClip.load(std::memory_order_relaxed);
             for (TrackMix* tm : active) {
+                if (pvClip != 0 && tm->loaded == pvClip) {  // live Volume Controls preview
+                    tm->gainL = m_previewGainL.load(std::memory_order_relaxed);
+                    tm->gainR = m_previewGainR.load(std::memory_order_relaxed);
+                }
                 tm->mixInto(mix.data(), want, kChannels, m_stop);
             }
             for (float& s : mix) {
@@ -656,30 +708,175 @@ void Player::reload(const Project& project)
     restartAt(position, wasPlaying);
 }
 
-void Player::refresh(const Project& project)
+void Player::beginPreview()
+{
+    if (!isOpen() || !m_decode) {
+        return;
+    }
+    pause();
+    stopThreads();  // idle the decode threads; we composite on the caller's thread now
+
+    m_previewLayers.clear();
+    const Tick frameDur = m_seq.frameDuration();
+    const int cw = m_seq.width(), ch = m_seq.height();
+    if (frameDur <= 0 || cw <= 0 || ch <= 0) {
+        return;
+    }
+    const Tick t = (ticksFromSeconds(position()) / frameDur) * frameDur;  // the displayed frame
+    m_previewTick = t;
+
+    // Position each active video track's decoder at the playhead and grab that frame.
+    for (std::size_t i = 0; i < m_seq.trackCount(); ++i) {
+        const Track& track = m_seq.track(i);
+        if (track.kind() != Track::Kind::Video) {
+            continue;
+        }
+        const Clip* clip = track.clipAt(t);
+        if (!clip) {
+            continue;
+        }
+        VideoLayer& layer = m_decode->video[i];
+        if (layer.source != clip->source || !layer.decoder.isOpen()) {
+            layer.decoder.close();
+            const auto pit = m_paths.find(clip->source);
+            if (pit != m_paths.end()) {
+                std::string err;
+                layer.decoder.open(pit->second, err);
+            }
+            layer.source = clip->source;
+        }
+        if (!layer.decoder.isOpen()) {
+            continue;
+        }
+        layer.decoder.seek(secondsFromTicks(clip->sourceTimeAt(t)));
+        layer.clipStart = clip->timelineStart;
+        layer.clipSourceIn = clip->sourceIn;
+        layer.loaded = clip->id;
+        layer.resetStream();
+        layer.advanceTo(t, m_stop);
+        if (layer.hasCurrent) {
+            m_previewLayers.push_back({ clip->id, layer.current });  // copy once, reuse per drag frame
+        }
+    }
+}
+
+const VideoFrame& Player::previewComposite(const Project& project)
+{
+    const int cw = m_seq.width(), ch = m_seq.height();
+    if (cw <= 0 || ch <= 0) {
+        m_previewCanvas = VideoFrame{};
+        return m_previewCanvas;
+    }
+    fillBlack(m_previewCanvas, cw, ch, secondsFromTicks(m_previewTick));  // reuses the buffer
+    const Sequence& seq = project.sequence();
+    for (const PreviewFrame& pl : m_previewLayers) {  // bottom-to-top
+        const Clip* clip = seq.findClip(pl.clip);
+        blitTransformed(m_previewCanvas, pl.frame, clip ? clip->transform : Transform{});
+    }
+    return m_previewCanvas;
+}
+
+void Player::setAudioPreview(ClipId clip, const AudioLevels& levels)
+{
+    float l = 1.0f, r = 1.0f;
+    computeGains(levels, l, r);
+    m_previewGainL.store(l, std::memory_order_relaxed);
+    m_previewGainR.store(r, std::memory_order_relaxed);
+    m_previewAudioClip.store(clip, std::memory_order_relaxed);  // set last: publishes the gains
+}
+
+void Player::beginScrub()
 {
     if (!isOpen()) {
         return;
     }
-    const Tick position = ticksFromSeconds(this->position());
-    const bool wasPlaying = isPlaying();
     pause();
-    stopThreads();
+    stopThreads();  // idle the decode threads; scrubComposite drives them ad-hoc
+    m_scrubbing = true;
+}
 
-    const std::size_t oldTrackCount = m_seq.trackCount();
-    m_seq = project.sequence();  // pick up the new effect values
-    m_paths.clear();
-    for (const MediaSource& media : project.mediaPool()) {
-        m_paths[media.id] = media.path;
+const VideoFrame& Player::scrubComposite(Tick t)
+{
+    const Tick frameDur = m_seq.frameDuration();
+    const int cw = m_seq.width(), ch = m_seq.height();
+    if (frameDur > 0) {
+        t = (t / frameDur) * frameDur;
     }
-    // Effect-only change: keep the decoders and their buffered frames so the current
-    // frame re-composites without a reseek/decode. (Guard against an unexpected
-    // structure change.)
-    if (m_decode && m_seq.trackCount() != oldTrackCount) {
-        m_decode->clear();
+    t = std::max<Tick>(0, t);
+    m_previewTick = t;
+    if (cw <= 0 || ch <= 0) {
+        m_previewCanvas = VideoFrame{};
+        return m_previewCanvas;
+    }
+    fillBlack(m_previewCanvas, cw, ch, secondsFromTicks(t));
+
+    if (m_decode) {
+        const Tick fwdLimit = ticksFromSeconds(1.5);  // decode forward for small steps; reseek for jumps
+        for (std::size_t i = 0; i < m_seq.trackCount(); ++i) {
+            const Track& track = m_seq.track(i);
+            if (track.kind() != Track::Kind::Video) {
+                continue;
+            }
+            const Clip* clip = track.clipAt(t);
+            if (!clip) {
+                continue;
+            }
+            VideoLayer& layer = m_decode->video[i];
+            const bool sameClip = layer.loaded == clip->id && layer.source == clip->source
+                                  && layer.decoder.isOpen();
+            const bool forward = sameClip && layer.hasCurrent && t >= layer.currentPts
+                                 && (t - layer.currentPts) <= fwdLimit;
+            if (!sameClip) {
+                if (layer.source != clip->source || !layer.decoder.isOpen()) {
+                    layer.decoder.close();
+                    const auto pit = m_paths.find(clip->source);
+                    if (pit != m_paths.end()) {
+                        std::string err;
+                        layer.decoder.open(pit->second, err);
+                    }
+                    layer.source = clip->source;
+                }
+                if (layer.decoder.isOpen()) {
+                    layer.decoder.seek(secondsFromTicks(clip->sourceTimeAt(t)));
+                }
+                layer.clipStart = clip->timelineStart;
+                layer.clipSourceIn = clip->sourceIn;
+                layer.loaded = clip->id;
+                layer.resetStream();
+            } else if (!forward) {
+                layer.decoder.seek(secondsFromTicks(clip->sourceTimeAt(t)));  // backward / big jump
+                layer.resetStream();
+            }
+            if (!layer.decoder.isOpen()) {
+                continue;
+            }
+            layer.advanceTo(t, m_stop);
+            if (layer.hasCurrent) {
+                blitTransformed(m_previewCanvas, layer.current, clip->transform);
+            }
+        }
     }
 
-    restartAt(position, wasPlaying);
+    // Keep the clock in step so the time readout follows the scrub.
+    m_startTick = t;
+    if (m_audioOut.isOpen()) {
+        m_audioOut.resetPosition(secondsFromTicks(t));
+    } else {
+        m_clock.reset(secondsFromTicks(t));
+    }
+    return m_previewCanvas;
+}
+
+void Player::endScrub()
+{
+    if (!m_scrubbing) {
+        return;
+    }
+    m_scrubbing = false;
+    if (m_decode) {
+        m_decode->invalidate();  // decoders were driven ad-hoc; reseek cleanly on restart
+    }
+    restartAt(m_startTick, false);  // resume paused at the scrub position
 }
 
 bool Player::isPlaying() const
