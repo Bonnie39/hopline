@@ -84,12 +84,31 @@ void fillBlack(VideoFrame& f, int cw, int ch, double pts)
 }
 
 // Volume Controls → per-channel linear gain (dB gain + balance pan).
-void computeGains(const AudioLevels& lv, float& gainL, float& gainR)
+void computeGains(double volumeDb, double panValue, float& gainL, float& gainR)
 {
-    const double gain = std::pow(10.0, lv.volumeDb / 20.0);
-    const double pan = std::clamp(lv.pan, -1.0, 1.0);
+    const double gain = std::pow(10.0, volumeDb / 20.0);
+    const double pan = std::clamp(panValue, -1.0, 1.0);
     gainL = static_cast<float>(gain * (pan > 0.0 ? 1.0 - pan : 1.0));
     gainR = static_cast<float>(gain * (pan < 0.0 ? 1.0 + pan : 1.0));
+}
+
+// A Transform evaluated at one instant (clip-local ticks) — plain values the
+// compositor consumes, after resolving each keyframed property.
+struct ResolvedTransform {
+    double scale = 1.0, posX = 0.0, posY = 0.0, rotation = 0.0, opacity = 1.0;
+    BlendMode blend = BlendMode::Normal;
+
+    bool isIdentity() const
+    {
+        return scale == 1.0 && posX == 0.0 && posY == 0.0 && rotation == 0.0
+               && opacity >= 1.0 && blend == BlendMode::Normal;
+    }
+};
+
+ResolvedTransform resolveTransform(const Transform& tf, Tick localT)
+{
+    return { tf.scale.at(localT), tf.posX.at(localT), tf.posY.at(localT),
+             tf.rotation.at(localT), tf.opacity.at(localT), tf.blend };
 }
 
 // Photoshop-style per-channel blend of a source value over a base (all 0..255).
@@ -120,7 +139,7 @@ int blendChannel(BlendMode mode, int b, int s)
 // Apply a clip's Transform effect: scale + rotation + position + opacity, bilinear
 // sampled, then blended with the layers below per its blend mode. The identity case
 // (no scale/rotate/move, full opacity, Normal) falls back to the fast centered blit.
-void blitTransformed(VideoFrame& canvas, const VideoFrame& src, const Transform& tf)
+void blitTransformed(VideoFrame& canvas, const VideoFrame& src, const ResolvedTransform& tf)
 {
     if (!src.valid() || tf.opacity <= 0.0 || tf.scale <= 0.0) {
         return;
@@ -277,8 +296,10 @@ struct TrackMix {
     std::vector<float> chunk;
     size_t consumed = 0;
     bool ended = false;
-    float gainL = 1.0f;  // from the clip's Volume Controls, refreshed when the clip loads
+    float gainL = 1.0f;  // resolved per mix chunk from `levels` (keyframed), or preview override
     float gainR = 1.0f;
+    AudioLevels levels;  // the clip's Volume Controls
+    Tick clipStart = 0;  // for clip-local keyframe times
 
     void resetStream()
     {
@@ -490,7 +511,7 @@ void Player::videoLoop()
             }
             layer.advanceTo(t, m_stop);
             if (layer.hasCurrent) {
-                blitTransformed(canvas, layer.current, layer.transform);
+                blitTransformed(canvas, layer.current, resolveTransform(layer.transform, t - layer.clipStart));
             }
         }
 
@@ -569,7 +590,8 @@ void Player::audioLoop()
                 tm.resetStream();
                 tm.loaded = clip->id;
             }
-            computeGains(clip->audio, tm.gainL, tm.gainR);  // refreshed each load (effect edits reload)
+            tm.levels = clip->audio;  // resolved per chunk in the mix loop (keyframes)
+            tm.clipStart = clip->timelineStart;
             if (tm.decoder.isOpen()) {
                 active.push_back(&tm);
             }
@@ -580,11 +602,15 @@ void Player::audioLoop()
         while (framesWritten < target && !m_stop) {
             const int64_t want = std::min<int64_t>(kMixChunkFrames, target - framesWritten);
             mix.assign(static_cast<size_t>(want) * kChannels, 0.0f);
+            const Tick chunkTick = ticksFromSeconds(static_cast<double>(framesWritten) / kSampleRate);
             const uint64_t pvClip = m_previewAudioClip.load(std::memory_order_relaxed);
             for (TrackMix* tm : active) {
                 if (pvClip != 0 && tm->loaded == pvClip) {  // live Volume Controls preview
                     tm->gainL = m_previewGainL.load(std::memory_order_relaxed);
                     tm->gainR = m_previewGainR.load(std::memory_order_relaxed);
+                } else {  // resolve keyframed volume/pan at this chunk's time
+                    const Tick localT = chunkTick - tm->clipStart;
+                    computeGains(tm->levels.volumeDb.at(localT), tm->levels.pan.at(localT), tm->gainL, tm->gainR);
                 }
                 tm->mixInto(mix.data(), want, kChannels, m_stop);
             }
@@ -771,15 +797,17 @@ const VideoFrame& Player::previewComposite(const Project& project)
     const Sequence& seq = project.sequence();
     for (const PreviewFrame& pl : m_previewLayers) {  // bottom-to-top
         const Clip* clip = seq.findClip(pl.clip);
-        blitTransformed(m_previewCanvas, pl.frame, clip ? clip->transform : Transform{});
+        const ResolvedTransform rt = clip ? resolveTransform(clip->transform, m_previewTick - clip->timelineStart)
+                                          : ResolvedTransform{};
+        blitTransformed(m_previewCanvas, pl.frame, rt);
     }
     return m_previewCanvas;
 }
 
-void Player::setAudioPreview(ClipId clip, const AudioLevels& levels)
+void Player::setAudioPreview(ClipId clip, double volumeDb, double pan)
 {
     float l = 1.0f, r = 1.0f;
-    computeGains(levels, l, r);
+    computeGains(volumeDb, pan, l, r);
     m_previewGainL.store(l, std::memory_order_relaxed);
     m_previewGainR.store(r, std::memory_order_relaxed);
     m_previewAudioClip.store(clip, std::memory_order_relaxed);  // set last: publishes the gains
@@ -852,7 +880,8 @@ const VideoFrame& Player::scrubComposite(Tick t)
             }
             layer.advanceTo(t, m_stop);
             if (layer.hasCurrent) {
-                blitTransformed(m_previewCanvas, layer.current, clip->transform);
+                blitTransformed(m_previewCanvas, layer.current,
+                                resolveTransform(clip->transform, t - clip->timelineStart));
             }
         }
     }

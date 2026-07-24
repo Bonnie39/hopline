@@ -57,6 +57,9 @@ Project buildProject()
     second.duration = 20000;
     second.transform = { 0.5, 120.0, -30.0, 45.0, 0.8, BlendMode::Screen };  // exercise transform round-trip
     second.audio = { -6.0, 0.5 };                                            // exercise audio round-trip
+    second.transform.posX.setKeyframe(0, 200.0);                             // exercise keyframe round-trip
+    second.transform.posX.setKeyframe(10000, 500.0);
+    second.audio.volumeDb.setKeyframe(5000, -12.0);
     stack.execute(project, std::make_unique<AddClipCommand>(0, second));
     return project;
 }

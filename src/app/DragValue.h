@@ -35,6 +35,8 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    void enterEvent(QEnterEvent* event) override;
+    void leaveEvent(QEvent* event) override;
     QSize sizeHint() const override;
 
 private:
@@ -51,6 +53,7 @@ private:
     QString m_suffix;
 
     QLineEdit* m_editor = nullptr;
+    bool m_hover = false;
     bool m_pressed = false;
     bool m_dragged = false;
     QPoint m_pressPos;

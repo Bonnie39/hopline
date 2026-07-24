@@ -10,7 +10,7 @@
 namespace hopline {
 namespace {
 
-constexpr int kFormatVersion = 5;  // v5 added per-clip transform + audio effects
+constexpr int kFormatVersion = 6;  // v6: effect properties are keyframable (v5 wrote plain doubles)
 
 using nlohmann::json;
 
@@ -45,6 +45,29 @@ MediaSource mediaFromJson(const json& j)
     return m;
 }
 
+json animToJson(const AnimatedValue& a)
+{
+    json keys = json::array();
+    for (const Keyframe& k : a.keys) {
+        keys.push_back({ { "t", k.time }, { "v", k.value } });
+    }
+    return json{ { "c", a.constant }, { "k", keys } };
+}
+
+AnimatedValue animFromJson(const json& j)
+{
+    AnimatedValue a;
+    if (j.is_number()) {  // v5 stored these as a plain double
+        a.constant = j.get<double>();
+        return a;
+    }
+    a.constant = j.value("c", 0.0);
+    for (const json& jk : j.value("k", json::array())) {
+        a.keys.push_back({ jk.at("t").get<Tick>(), jk.at("v").get<double>() });
+    }
+    return a;
+}
+
 json clipToJson(const Clip& c)
 {
     return json{
@@ -52,10 +75,12 @@ json clipToJson(const Clip& c)
         { "sourceIn", c.sourceIn }, { "duration", c.duration }, { "linkGroup", c.linkGroup },
         { "label", c.label },
         { "transform",
-          { { "scale", c.transform.scale }, { "posX", c.transform.posX }, { "posY", c.transform.posY },
-            { "rotation", c.transform.rotation }, { "opacity", c.transform.opacity },
+          { { "scale", animToJson(c.transform.scale) }, { "posX", animToJson(c.transform.posX) },
+            { "posY", animToJson(c.transform.posY) }, { "rotation", animToJson(c.transform.rotation) },
+            { "opacity", animToJson(c.transform.opacity) },
             { "blend", static_cast<int>(c.transform.blend) } } },
-        { "audio", { { "volumeDb", c.audio.volumeDb }, { "pan", c.audio.pan } } },
+        { "audio",
+          { { "volumeDb", animToJson(c.audio.volumeDb) }, { "pan", animToJson(c.audio.pan) } } },
     };
 }
 
@@ -70,16 +95,16 @@ Clip clipFromJson(const json& j)
     c.linkGroup = j.value("linkGroup", kNoLink);
     c.label = j.value("label", 0);
     if (const auto t = j.find("transform"); t != j.end()) {
-        c.transform.scale = t->value("scale", 1.0);
-        c.transform.posX = t->value("posX", 0.0);
-        c.transform.posY = t->value("posY", 0.0);
-        c.transform.rotation = t->value("rotation", 0.0);
-        c.transform.opacity = t->value("opacity", 1.0);
+        c.transform.scale = animFromJson(t->value("scale", json(1.0)));
+        c.transform.posX = animFromJson(t->value("posX", json(0.0)));
+        c.transform.posY = animFromJson(t->value("posY", json(0.0)));
+        c.transform.rotation = animFromJson(t->value("rotation", json(0.0)));
+        c.transform.opacity = animFromJson(t->value("opacity", json(1.0)));
         c.transform.blend = static_cast<BlendMode>(t->value("blend", 0));
     }
     if (const auto a = j.find("audio"); a != j.end()) {
-        c.audio.volumeDb = a->value("volumeDb", 0.0);
-        c.audio.pan = a->value("pan", 0.0);
+        c.audio.volumeDb = animFromJson(a->value("volumeDb", json(0.0)));
+        c.audio.pan = animFromJson(a->value("pan", json(0.0)));
     }
     return c;
 }

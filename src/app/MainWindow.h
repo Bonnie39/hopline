@@ -25,6 +25,7 @@ class IconButton;
 class AudioMeter;
 class ToolboxWidget;
 class EffectControls;
+enum class FxProp;  // scoped enum → fixed underlying type, forward-declarable
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -62,6 +63,8 @@ private slots:
     void seekRelative(double seconds);
     void timelineScrubbed(Tick time);
 
+    void onPropertyEdited(FxProp prop, double modelValue, bool committing);
+    void onKeyframeToggled(FxProp prop, bool enabled);
     void onClipMoved(std::size_t fromTrack, ClipId clip, int levelDelta, Tick newStart);
     void onClipTrimmed(std::size_t trackIndex, ClipId clip, bool trimHead, Tick delta);
     void onUnlink(ClipId clip);
@@ -83,7 +86,8 @@ private:
     void activateSequence(SequenceId sequence);
     SequenceId ensureActiveSequence(const MediaSource& source);
     void seedTracks(SequenceId sequence);  // pad a new sequence to 3 video + 3 audio tracks
-    void updateEffectPanel(ClipId clip);   // show the selected clip's Transform / Volume effect
+    void updateEffectPanel(ClipId clip);         // show the selected clip's Transform / Volume effect
+    void applyKeyEdits(const std::vector<struct KeyEdit>& edits);  // move/delete keys from the pane
     int trackIndexForLevel(bool video, int level);
     void ensureTrackLevel(bool video, int level);
     void syncSequenceTabs();
@@ -108,10 +112,13 @@ private:
     ClipId m_fxVideoClip = kInvalidClip;
     std::size_t m_fxAudioTrack = 0;
     ClipId m_fxAudioClip = kInvalidClip;
-    // Live transform-scrub state: baseline captured at drag start so the whole drag
-    // becomes a single undo step on commit. Audio commits on release (no live preview).
-    bool m_fxTransformEditing = false;
-    Transform m_fxTransformBaseline;
+    // Live effect-scrub state: baseline captured at drag start so the whole drag becomes
+    // a single undo step on commit. m_fxHasAnim drives the playhead-follow value refresh.
+    bool m_fxEditing = false;
+    bool m_fxHasAnim = false;
+    Transform m_fxVideoBaseline;
+    AudioLevels m_fxAudioBaseline;
+    Tick m_lastFxPlayhead = -1;
     QDockWidget* m_browserDock = nullptr;
     QDockWidget* m_timelineDock = nullptr;
     QDockWidget* m_logDock = nullptr;

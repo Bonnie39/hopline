@@ -41,7 +41,7 @@ namespace {
 
 // Bump when the dock set or default arrangement changes, so a stale saved layout
 // is discarded.
-constexpr int kLayoutVersion = 7;  // added the Effect Controls dock
+constexpr int kLayoutVersion = 9;  // wider effects + media docks
 
 // Transport time readout: M:SS.CC.
 QString formatClock(double seconds)
@@ -279,56 +279,41 @@ MainWindow::MainWindow(QWidget* parent)
     m_effectsDock = new QDockWidget("Effect Controls", this);
     m_effectsDock->setObjectName("effectsDock");
     m_effectsDock->setWidget(m_effects);
-    connect(m_effects, &EffectControls::transformEdited, this, [this](const Transform& t, bool committing) {
+    connect(m_effects, &EffectControls::propertyEdited, this, &MainWindow::onPropertyEdited);
+    connect(m_effects, &EffectControls::keyframeToggled, this, &MainWindow::onKeyframeToggled);
+    connect(m_effects, &EffectControls::blendEdited, this, [this](BlendMode blend) {
         if (m_fxVideoClip == kInvalidClip) {
             return;
         }
-        if (!m_fxTransformEditing) {  // start of an interaction: capture baseline
-            m_fxTransformEditing = true;
-            const Clip* c = m_project.sequence().findClip(m_fxVideoClip);
-            m_fxTransformBaseline = c ? c->transform : Transform{};
-            if (!committing && m_player) {
-                m_player->beginPreview();  // idle threads + capture playhead frames (a drag)
-            }
-        }
-        if (!committing) {
-            // Live preview: mutate directly and re-composite on the UI thread (no thread churn).
-            m_project.sequence().track(m_fxVideoTrack).setTransform(m_fxVideoClip, t);
-            if (m_player) {
-                m_preview->setFrame(m_player->previewComposite(m_project));
-            }
+        const Clip* c = m_project.sequence().findClip(m_fxVideoClip);
+        if (!c) {
             return;
         }
-        m_fxTransformEditing = false;
-        // Restore the baseline, then record the whole drag as one undoable command.
-        m_project.sequence().track(m_fxVideoTrack).setTransform(m_fxVideoClip, m_fxTransformBaseline);
-        if (t != m_fxTransformBaseline
-            && m_commands.execute(m_project,
-                                  std::make_unique<SetClipTransformCommand>(m_fxVideoTrack, m_fxVideoClip, t))) {
-            commitEdit();  // reload restarts the decode threads, ending the preview
-        } else if (m_player) {
-            m_player->reload(m_project);  // no net change: restart threads to end preview
-        }
-    });
-    connect(m_effects, &EffectControls::audioEdited, this, [this](const AudioLevels& a, bool committing) {
-        if (m_fxAudioClip == kInvalidClip) {
-            return;
-        }
-        if (!committing) {
-            // Live: the audio thread reads these gains for the clip (heard live while playing).
-            if (m_player) {
-                m_player->setAudioPreview(m_fxAudioClip, a);
-            }
-            return;
-        }
-        if (m_player) {
-            m_player->clearAudioPreview();
-        }
+        Transform t = c->transform;
+        t.blend = blend;
         if (m_commands.execute(m_project,
-                               std::make_unique<SetClipAudioCommand>(m_fxAudioTrack, m_fxAudioClip, a))) {
+                               std::make_unique<SetClipTransformCommand>(m_fxVideoTrack, m_fxVideoClip, t))) {
             commitEdit();
         }
     });
+    connect(m_effects, &EffectControls::scrubBegin, this, [this] {
+        m_scrubbing = true;
+        if (m_player) {
+            m_player->beginScrub();
+        }
+    });
+    connect(m_effects, &EffectControls::scrubEnd, this, [this] {
+        m_scrubbing = false;
+        if (m_player) {
+            m_player->endScrub();
+        }
+    });
+    connect(m_effects, &EffectControls::seekRequested, this, [this](Tick t) {
+        m_timeline->setPlayhead(t);
+        timelineScrubbed(t);  // scrubComposite while ruler-scrubbing, else a plain seek (arrow jump)
+        updateEffectPanel(m_timeline->selected());
+    });
+    connect(m_effects, &EffectControls::keyframesEdited, this, &MainWindow::applyKeyEdits);
 
     m_toolbox = new ToolboxWidget(this);
     m_toolsDock = new QDockWidget("Tools", this);
@@ -417,9 +402,9 @@ void MainWindow::applyDefaultLayout()
     }
 
     const int w = width() > 100 ? width() : 1600;
-    resizeDocks({ m_browserDock, m_toolsDock, m_timelineDock, m_meterDock }, { 300, 42, w - 412, 70 },
+    resizeDocks({ m_browserDock, m_toolsDock, m_timelineDock, m_meterDock }, { 380, 42, w - 492, 70 },
                 Qt::Horizontal);
-    resizeDocks({ m_effectsDock }, { 300 }, Qt::Horizontal);
+    resizeDocks({ m_effectsDock }, { 600 }, Qt::Horizontal);  // room for an even effects/keyframes split
     resizeDocks({ m_browserDock, m_timelineDock }, { 440, 440 }, Qt::Vertical);  // taller timeline (fits 3+3 tracks)
 }
 
@@ -922,6 +907,58 @@ std::vector<std::pair<std::size_t, ClipId>> editTargets(const Project& project, 
     return { { track, clip } };
 }
 
+bool isVideoProp(FxProp p)
+{
+    return p == FxProp::PosX || p == FxProp::PosY || p == FxProp::Scale || p == FxProp::Rotation
+           || p == FxProp::Opacity;
+}
+
+AnimatedValue& videoAV(Transform& t, FxProp p)
+{
+    switch (p) {
+    case FxProp::PosX:     return t.posX;
+    case FxProp::PosY:     return t.posY;
+    case FxProp::Scale:    return t.scale;
+    case FxProp::Rotation: return t.rotation;
+    default:              return t.opacity;
+    }
+}
+
+AnimatedValue& audioAV(AudioLevels& a, FxProp p) { return p == FxProp::VolumeDb ? a.volumeDb : a.pan; }
+
+const AnimatedValue& videoAVc(const Transform& t, FxProp p)
+{
+    switch (p) {
+    case FxProp::PosX:     return t.posX;
+    case FxProp::PosY:     return t.posY;
+    case FxProp::Scale:    return t.scale;
+    case FxProp::Rotation: return t.rotation;
+    default:              return t.opacity;
+    }
+}
+
+const AnimatedValue& audioAVc(const AudioLevels& a, FxProp p) { return p == FxProp::VolumeDb ? a.volumeDb : a.pan; }
+
+// Set the property to `value` at the playhead: a keyframe when animated, else the constant.
+void applyProp(AnimatedValue& av, double value, Tick localT)
+{
+    if (av.animated()) {
+        av.setKeyframe(localT, value);
+    } else {
+        av.constant = value;
+    }
+}
+
+std::vector<Tick> keyTimes(const AnimatedValue& av)
+{
+    std::vector<Tick> t;
+    t.reserve(av.keys.size());
+    for (const Keyframe& k : av.keys) {
+        t.push_back(k.time);
+    }
+    return t;
+}
+
 }  // namespace
 
 void MainWindow::updateEffectPanel(ClipId clip)
@@ -966,10 +1003,214 @@ void MainWindow::updateEffectPanel(ClipId clip)
     }
 
     if (!videoClip && !audioClip) {
+        m_fxHasAnim = false;
         m_effects->showNone();
-    } else {
-        m_effects->showClip(videoClip, audioClip, seq.width(), seq.height());
+        return;
     }
+
+    // Build the resolved-at-playhead view for the panel.
+    const Tick playhead = m_timeline->playhead();
+    FxView view;
+    view.canvasW = seq.width();
+    view.canvasH = seq.height();
+    bool anyAnim = false;
+    if (videoClip) {
+        view.hasVideo = true;
+        const Transform& tf = videoClip->transform;
+        const Tick lt = playhead - videoClip->timelineStart;
+        view.posX = tf.posX.at(lt);
+        view.posY = tf.posY.at(lt);
+        view.scale = tf.scale.at(lt);
+        view.rotation = tf.rotation.at(lt);
+        view.opacity = tf.opacity.at(lt);
+        view.blend = tf.blend;
+        view.anim[static_cast<int>(FxProp::PosX)] = tf.posX.animated();
+        view.anim[static_cast<int>(FxProp::PosY)] = tf.posY.animated();
+        view.anim[static_cast<int>(FxProp::Scale)] = tf.scale.animated();
+        view.anim[static_cast<int>(FxProp::Rotation)] = tf.rotation.animated();
+        view.anim[static_cast<int>(FxProp::Opacity)] = tf.opacity.animated();
+        view.keys[static_cast<int>(FxProp::PosX)] = keyTimes(tf.posX);
+        view.keys[static_cast<int>(FxProp::PosY)] = keyTimes(tf.posY);
+        view.keys[static_cast<int>(FxProp::Scale)] = keyTimes(tf.scale);
+        view.keys[static_cast<int>(FxProp::Rotation)] = keyTimes(tf.rotation);
+        view.keys[static_cast<int>(FxProp::Opacity)] = keyTimes(tf.opacity);
+        anyAnim = anyAnim || tf.posX.animated() || tf.posY.animated() || tf.scale.animated()
+                  || tf.rotation.animated() || tf.opacity.animated();
+    }
+    if (audioClip) {
+        view.hasAudio = true;
+        const AudioLevels& lv = audioClip->audio;
+        const Tick lt = playhead - audioClip->timelineStart;
+        view.volumeDb = lv.volumeDb.at(lt);
+        view.pan = lv.pan.at(lt);
+        view.anim[static_cast<int>(FxProp::VolumeDb)] = lv.volumeDb.animated();
+        view.anim[static_cast<int>(FxProp::Pan)] = lv.pan.animated();
+        view.keys[static_cast<int>(FxProp::VolumeDb)] = keyTimes(lv.volumeDb);
+        view.keys[static_cast<int>(FxProp::Pan)] = keyTimes(lv.pan);
+        anyAnim = anyAnim || lv.volumeDb.animated() || lv.pan.animated();
+    }
+    // Keyframe pane time axis: the primary (video, else audio) clip.
+    const Clip* primary = videoClip ? videoClip : audioClip;
+    view.clipStart = primary->timelineStart;
+    view.clipDuration = primary->duration;
+    view.playheadLocal = playhead - primary->timelineStart;
+    m_fxHasAnim = anyAnim;  // drives the playhead-follow value refresh
+    m_effects->showClip(view);
+}
+
+void MainWindow::onPropertyEdited(FxProp prop, double modelValue, bool committing)
+{
+    const bool video = isVideoProp(prop);
+    const ClipId clipId = video ? m_fxVideoClip : m_fxAudioClip;
+    const std::size_t track = video ? m_fxVideoTrack : m_fxAudioTrack;
+    if (clipId == kInvalidClip) {
+        return;
+    }
+    const Clip* c = m_project.sequence().findClip(clipId);
+    if (!c) {
+        return;
+    }
+    const Tick localT = m_timeline->playhead() - c->timelineStart;
+
+    if (video) {
+        if (!m_fxEditing) {  // interaction start: capture baseline for a single undo step
+            m_fxEditing = true;
+            m_fxVideoBaseline = c->transform;
+            if (!committing && m_player) {
+                m_player->beginPreview();  // idle threads + capture playhead frames (a drag)
+            }
+        }
+        Transform nt = m_fxVideoBaseline;  // recompute from baseline so a drag doesn't accumulate
+        applyProp(videoAV(nt, prop), modelValue, localT);
+        if (!committing) {
+            m_project.sequence().track(track).setTransform(clipId, nt);
+            if (m_player) {
+                m_preview->setFrame(m_player->previewComposite(m_project));
+            }
+            return;
+        }
+        m_fxEditing = false;
+        m_project.sequence().track(track).setTransform(clipId, m_fxVideoBaseline);  // restore for undo
+        if (nt != m_fxVideoBaseline
+            && m_commands.execute(m_project, std::make_unique<SetClipTransformCommand>(track, clipId, nt))) {
+            commitEdit();
+        } else if (m_player) {
+            m_player->reload(m_project);  // no net change: restart threads to end the preview
+        }
+    } else {
+        if (!m_fxEditing) {
+            m_fxEditing = true;
+            m_fxAudioBaseline = c->audio;
+        }
+        AudioLevels na = m_fxAudioBaseline;
+        applyProp(audioAV(na, prop), modelValue, localT);
+        if (!committing) {
+            if (m_player) {  // live via the audio-thread override (resolved at the playhead)
+                m_player->setAudioPreview(clipId, na.volumeDb.at(localT), na.pan.at(localT));
+            }
+            return;
+        }
+        m_fxEditing = false;
+        if (m_player) {
+            m_player->clearAudioPreview();
+        }
+        if (na != m_fxAudioBaseline
+            && m_commands.execute(m_project, std::make_unique<SetClipAudioCommand>(track, clipId, na))) {
+            commitEdit();
+        }
+    }
+    updateEffectPanel(m_timeline->selected());  // show a just-created keyframe's diamond now (drags returned above)
+}
+
+void MainWindow::onKeyframeToggled(FxProp prop, bool enabled)
+{
+    const bool video = isVideoProp(prop);
+    const ClipId clipId = video ? m_fxVideoClip : m_fxAudioClip;
+    const std::size_t track = video ? m_fxVideoTrack : m_fxAudioTrack;
+    if (clipId == kInvalidClip) {
+        return;
+    }
+    const Clip* c = m_project.sequence().findClip(clipId);
+    if (!c) {
+        return;
+    }
+    const Tick localT = m_timeline->playhead() - c->timelineStart;
+
+    auto toggle = [&](AnimatedValue& av) {
+        const double cur = av.at(localT);
+        av.clearKeys();
+        if (enabled) {
+            av.setKeyframe(localT, cur);  // first keyframe at the playhead
+        } else {
+            av.constant = cur;            // collapse to a constant (value at the playhead)
+        }
+    };
+
+    if (video) {
+        Transform t = c->transform;
+        toggle(videoAV(t, prop));
+        if (m_commands.execute(m_project, std::make_unique<SetClipTransformCommand>(track, clipId, t))) {
+            commitEdit();
+        }
+    } else {
+        AudioLevels a = c->audio;
+        toggle(audioAV(a, prop));
+        if (m_commands.execute(m_project, std::make_unique<SetClipAudioCommand>(track, clipId, a))) {
+            commitEdit();
+        }
+    }
+    updateEffectPanel(m_timeline->selected());  // reflect the new animated state
+}
+
+void MainWindow::applyKeyEdits(const std::vector<KeyEdit>& edits)
+{
+    if (edits.empty()) {
+        return;
+    }
+    const Clip* vc = m_fxVideoClip != kInvalidClip ? m_project.sequence().findClip(m_fxVideoClip) : nullptr;
+    const Clip* ac = m_fxAudioClip != kInvalidClip ? m_project.sequence().findClip(m_fxAudioClip) : nullptr;
+
+    Transform t = vc ? vc->transform : Transform{};
+    AudioLevels a = ac ? ac->audio : AudioLevels{};
+    bool videoChanged = false, audioChanged = false;
+
+    // Capture each key's value from the *original* first, then remove all, then add all —
+    // so overlapping moves within a property don't read a half-modified curve.
+    struct Cap {
+        const KeyEdit* e;
+        double val;
+        bool video;
+    };
+    std::vector<Cap> caps;
+    for (const KeyEdit& e : edits) {
+        const bool video = isVideoProp(e.prop);
+        if ((video && !vc) || (!video && !ac)) {
+            continue;
+        }
+        const AnimatedValue& av0 = video ? videoAVc(vc->transform, e.prop) : audioAVc(ac->audio, e.prop);
+        caps.push_back({ &e, av0.at(e.oldTime), video });
+    }
+    for (const Cap& c : caps) {
+        (c.video ? videoAV(t, c.e->prop) : audioAV(a, c.e->prop)).removeKeyframe(c.e->oldTime);
+        (c.video ? videoChanged : audioChanged) = true;
+    }
+    for (const Cap& c : caps) {
+        if (!c.e->remove) {
+            (c.video ? videoAV(t, c.e->prop) : audioAV(a, c.e->prop)).setKeyframe(c.e->newTime, c.val);
+        }
+    }
+
+    auto compound = std::make_unique<CompoundCommand>("Keyframes");
+    if (videoChanged) {
+        compound->add(std::make_unique<SetClipTransformCommand>(m_fxVideoTrack, m_fxVideoClip, t));
+    }
+    if (audioChanged) {
+        compound->add(std::make_unique<SetClipAudioCommand>(m_fxAudioTrack, m_fxAudioClip, a));
+    }
+    if (m_commands.execute(m_project, std::move(compound))) {
+        commitEdit();
+    }
+    updateEffectPanel(m_timeline->selected());
 }
 
 void MainWindow::commitEdit()
@@ -1142,6 +1383,15 @@ void MainWindow::tick()
     }
 
     m_timeline->setPlayhead(ticksFromSeconds(m_player->position()));
+
+    // Keyframed values in the panel follow the playhead (only when animated + idle).
+    if (m_fxHasAnim && !m_fxEditing) {
+        const Tick ph = m_timeline->playhead();
+        if (ph != m_lastFxPlayhead) {
+            m_lastFxPlayhead = ph;
+            updateEffectPanel(m_timeline->selected());
+        }
+    }
 
     const bool playing = m_player->isPlaying();
     m_playButton->setGlyph(playing ? IconButton::Glyph::Pause : IconButton::Glyph::Play);

@@ -55,7 +55,7 @@ public:
     // Live audio (Volume Controls) preview: while set, the audio thread reads these
     // gains for `clip` instead of its committed levels — so a volume/pan drag is heard
     // live during playback without restarting the audio thread. Clear on commit.
-    void setAudioPreview(ClipId clip, const AudioLevels& levels);
+    void setAudioPreview(ClipId clip, double volumeDb, double pan);
     void clearAudioPreview() { m_previewAudioClip.store(0, std::memory_order_relaxed); }
 
     // Timeline scrubbing without restarting the decode threads per move: beginScrub()

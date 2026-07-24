@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include <QEnterEvent>
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QPainter>
@@ -13,6 +14,7 @@ namespace {
 constexpr int kDragThreshold = 3;
 const QColor kValueColor(126, 178, 230);  // highlighted, clickable-looking number
 const QColor kSuffixColor(120, 122, 128);
+const QColor kHoverFill(126, 178, 230, 28);  // hover pill
 }  // namespace
 
 DragValue::DragValue(QWidget* parent)
@@ -58,7 +60,11 @@ double DragValue::clamp(double v) const
 
 void DragValue::setValue(double value)
 {
-    m_value = clamp(value);
+    const double v = clamp(value);
+    if (v == m_value) {
+        return;  // no-op: avoids repaint spam when the panel re-feeds values each frame
+    }
+    m_value = v;
     update();
 }
 
@@ -73,9 +79,17 @@ void DragValue::paintEvent(QPaintEvent*)
         return;  // the text editor covers us
     }
     QPainter p(this);
-    p.setPen(kValueColor);
+    p.setRenderHint(QPainter::Antialiasing);
     const QString num = QString::number(m_value, 'f', m_decimals);
     const QRect r = rect().adjusted(1, 0, -1, 0);
+    if (m_hover) {
+        const int textW = fontMetrics().horizontalAdvance(num + m_suffix);
+        QRectF pill(r.left() - 3, r.center().y() - 9, textW + 10, 18);
+        p.setPen(Qt::NoPen);
+        p.setBrush(kHoverFill);
+        p.drawRoundedRect(pill, 4, 4);
+    }
+    p.setPen(kValueColor);
     p.drawText(r, Qt::AlignVCenter | Qt::AlignLeft, num);
     if (!m_suffix.isEmpty()) {
         const int numW = fontMetrics().horizontalAdvance(num);
@@ -125,6 +139,18 @@ void DragValue::mouseReleaseEvent(QMouseEvent* event)
     } else {
         beginEdit();  // a click (no drag) opens the text editor
     }
+}
+
+void DragValue::enterEvent(QEnterEvent*)
+{
+    m_hover = true;
+    update();
+}
+
+void DragValue::leaveEvent(QEvent*)
+{
+    m_hover = false;
+    update();
 }
 
 void DragValue::beginEdit()
