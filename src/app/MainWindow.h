@@ -47,6 +47,7 @@ private slots:
     void openProject();
     void saveProject();
     void saveProjectAs();
+    void exportMedia();
     void importMediaDialog(FolderId folder);
     void onNewFolder(FolderId parent);
     void onDeleteFolder(FolderId folder);

@@ -1,11 +1,17 @@
 #include "app/MainWindow.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <tuple>
 #include <utility>
 
 #include <QCloseEvent>
+#include <QCoreApplication>
 #include <QDockWidget>
+#include <QEventLoop>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -16,6 +22,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QProgressDialog>
 #include <QSettings>
 #include <QShortcut>
 #include <QShowEvent>
@@ -35,6 +42,7 @@
 #include "app/TimelineScrollBar.h"
 #include "app/TimelineWidget.h"
 #include "app/ToolboxWidget.h"
+#include "engine/Exporter.h"
 #include "media/MediaProbe.h"
 #include "model/Commands.h"
 #include "model/ProjectIO.h"
@@ -359,6 +367,8 @@ MainWindow::MainWindow(QWidget* parent)
     fileMenu->addAction("Save Project &As…", QKeySequence::SaveAs, this, &MainWindow::saveProjectAs);
     fileMenu->addSeparator();
     fileMenu->addAction("&Import Media…", this, [this] { importMediaDialog(m_browser->currentFolder()); });
+    fileMenu->addSeparator();
+    fileMenu->addAction("&Export Media…", QKeySequence("Ctrl+E"), this, &MainWindow::exportMedia);
     fileMenu->addSeparator();
     fileMenu->addAction("E&xit", QKeySequence::Quit, this, &QWidget::close);
 
@@ -803,6 +813,69 @@ void MainWindow::saveProjectAs()
     }
     m_projectPath = path;
     saveProject();
+}
+
+void MainWindow::exportMedia()
+{
+    if (!m_project.hasActiveSequence() || m_project.sequence().duration() <= 0) {
+        statusBar()->showMessage("Nothing to export — the active sequence is empty.");
+        return;
+    }
+    QString path = QFileDialog::getSaveFileName(this, "Export Media", QString(), "MP4 Video (*.mp4)");
+    if (path.isEmpty()) {
+        return;
+    }
+    if (!path.endsWith(".mp4", Qt::CaseInsensitive)) {
+        path += ".mp4";
+    }
+
+    if (m_player) {
+        m_player->pause();  // free the CPU for the export; playback threads idle on a full queue
+    }
+
+    // The exporter runs headless on a worker thread; the UI polls progress and can cancel.
+    const Project snapshot = m_project;  // decouple from any later edits
+    const std::string outPath = path.toStdString();
+    std::atomic<double> progress{ 0.0 };
+    std::atomic<bool> cancel{ false };
+    std::atomic<bool> done{ false };
+    bool ok = false;
+    std::string error;
+
+    std::thread worker([&] {
+        Exporter exporter;
+        ok = exporter.run(snapshot, outPath, [&](double p) { progress.store(p, std::memory_order_relaxed); },
+                          cancel, error);
+        done.store(true, std::memory_order_release);
+    });
+
+    QProgressDialog dlg("Exporting…", "Cancel", 0, 100, this);
+    dlg.setWindowTitle("Export");
+    dlg.setWindowModality(Qt::WindowModal);
+    dlg.setMinimumDuration(0);
+    dlg.setAutoClose(false);
+    dlg.setAutoReset(false);
+    dlg.setValue(0);
+    while (!done.load(std::memory_order_acquire)) {
+        dlg.setValue(static_cast<int>(progress.load(std::memory_order_relaxed) * 100.0));
+        if (dlg.wasCanceled()) {
+            cancel.store(true, std::memory_order_relaxed);
+        }
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 30);
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    }
+    worker.join();
+    dlg.reset();
+
+    if (cancel.load(std::memory_order_relaxed)) {
+        QFile::remove(path);  // partial file has no trailer; drop it
+        statusBar()->showMessage("Export canceled.");
+    } else if (ok) {
+        statusBar()->showMessage("Exported to " + path);
+    } else {
+        QFile::remove(path);
+        statusBar()->showMessage("Export failed: " + QString::fromStdString(error));
+    }
 }
 
 void MainWindow::importMediaDialog(FolderId folder)

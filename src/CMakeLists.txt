@@ -27,6 +27,9 @@ qt_add_executable(hopline
     engine/AudioOutput.cpp
     engine/AudioOutput.h
     engine/Clock.h
+    engine/Compositor.h
+    engine/Exporter.cpp
+    engine/Exporter.h
     engine/FrameQueue.cpp
     engine/FrameQueue.h
     engine/Player.cpp
@@ -35,6 +38,8 @@ qt_add_executable(hopline
     engine/RingBuffer.h
     media/AudioDecoder.cpp
     media/AudioDecoder.h
+    media/Encoder.cpp
+    media/Encoder.h
     media/MediaProbe.cpp
     media/MediaProbe.h
     media/VideoDecoder.cpp
