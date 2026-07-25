@@ -186,6 +186,9 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_timeline, &TimelineWidget::deleteSelectionRequested, this, &MainWindow::deleteSelection);
     connect(m_timeline, &TimelineWidget::addTrackRequested, this, &MainWindow::onAddTrack);
     connect(m_timeline, &TimelineWidget::deleteTrackRequested, this, &MainWindow::onDeleteTrack);
+    connect(m_timeline, &TimelineWidget::trackVisibilityToggled, this, &MainWindow::onTrackVisibility);
+    connect(m_timeline, &TimelineWidget::trackMuteToggled, this, &MainWindow::onTrackMute);
+    connect(m_timeline, &TimelineWidget::trackSoloToggled, this, &MainWindow::onTrackSolo);
     connect(m_timeline, &TimelineWidget::selectionChanged, this, [this](ClipId clip) {
         statusBar()->showMessage(clip ? QString("Selected clip %1").arg(clip) : QString("Ready"));
         updateEffectPanel(clip);
@@ -898,6 +901,36 @@ void MainWindow::onDeleteTrack(std::size_t trackIndex)
     m_project.sequence().removeTrackAt(trackIndex);
     m_commands.clear();
     m_timeline->clearSelection();
+    commitEdit();
+}
+
+void MainWindow::onTrackVisibility(std::size_t trackIndex)
+{
+    if (!m_project.hasActiveSequence() || trackIndex >= m_project.sequence().trackCount()) {
+        return;
+    }
+    Track& t = m_project.sequence().track(trackIndex);
+    t.setVisible(!t.visible());
+    commitEdit();
+}
+
+void MainWindow::onTrackMute(std::size_t trackIndex)
+{
+    if (!m_project.hasActiveSequence() || trackIndex >= m_project.sequence().trackCount()) {
+        return;
+    }
+    Track& t = m_project.sequence().track(trackIndex);
+    t.setMuted(!t.muted());
+    commitEdit();
+}
+
+void MainWindow::onTrackSolo(std::size_t trackIndex)
+{
+    if (!m_project.hasActiveSequence() || trackIndex >= m_project.sequence().trackCount()) {
+        return;
+    }
+    Track& t = m_project.sequence().track(trackIndex);
+    t.setSoloed(!t.soloed());
     commitEdit();
 }
 

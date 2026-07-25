@@ -77,6 +77,9 @@ signals:
     void deleteSelectionRequested();  // delete the whole multi-selection
     void addTrackRequested(bool video);
     void deleteTrackRequested(std::size_t trackIndex);
+    void trackVisibilityToggled(std::size_t trackIndex);  // video eye
+    void trackMuteToggled(std::size_t trackIndex);         // audio M
+    void trackSoloToggled(std::size_t trackIndex);         // audio S
     void mediaDropped(MediaId media, Tick start, int level);
     void fileDropped(const QString& path, Tick start, int level);
 
@@ -108,6 +111,13 @@ private:
     // A vertical zoom bar drag: scroll the section, or zoom (resize track height)
     // from either end.
     enum class VDrag { None, Scroll, ZoomTop, ZoomBottom };
+
+    // Track-header playback toggles: eye (video), M/S (audio).
+    enum class TrackButton { None, Visible, Mute, Solo };
+    struct TrackButtonHit {
+        TrackButton kind = TrackButton::None;
+        std::size_t track = 0;
+    };
 
     struct Hit {
         bool onRuler = false;
@@ -181,6 +191,9 @@ private:
     RollHit rollHitTest(const QPoint& pos) const;  // shared boundary under the cursor
     void buildRollPairs();                         // base pair + linked-partner boundaries
     Tick clampRollDelta(Tick delta) const;         // limited by whichever side is shorter
+    QRect trackButtonRect(std::size_t track, TrackButton which) const;  // header toggle geometry
+    TrackButtonHit trackButtonAt(const QPoint& pos) const;
+    void drawTrackHeaderButtons(QPainter& painter, std::size_t track);
     void updateHoverCursor(const QPoint& pos);
     void updateVDrag(int y);  // apply a vertical-bar scroll/zoom drag
     void commitDrag();

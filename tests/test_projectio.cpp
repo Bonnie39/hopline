@@ -61,6 +61,10 @@ Project buildProject()
     second.transform.posX.setKeyframe(10000, 500.0);
     second.audio.volumeDb.setKeyframe(5000, -12.0);
     stack.execute(project, std::make_unique<AddClipCommand>(0, second));
+
+    project.sequence().track(0).setVisible(false);  // exercise track toggle round-trip
+    project.sequence().track(1).setMuted(true);
+    project.sequence().track(1).setSoloed(true);
     return project;
 }
 
@@ -110,6 +114,9 @@ TEST_CASE("a project round-trips through serialize/deserialize", "[projectio]")
     CHECK(loaded.sequence().rateDen() == original.sequence().rateDen());
 
     for (size_t t = 0; t < original.sequence().trackCount(); ++t) {
+        CHECK(loaded.sequence().track(t).visible() == original.sequence().track(t).visible());
+        CHECK(loaded.sequence().track(t).muted() == original.sequence().track(t).muted());
+        CHECK(loaded.sequence().track(t).soloed() == original.sequence().track(t).soloed());
         const auto& oc = original.sequence().track(t).clips();
         const auto& lc = loaded.sequence().track(t).clips();
         REQUIRE(lc.size() == oc.size());

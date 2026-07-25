@@ -473,7 +473,7 @@ void Player::videoLoop()
         // earlier ones), so the last one drawn ends up on top.
         for (std::size_t i = 0; i < m_seq.trackCount() && !m_stop; ++i) {
             const Track& track = m_seq.track(i);
-            if (track.kind() != Track::Kind::Video) {
+            if (track.kind() != Track::Kind::Video || !track.visible()) {
                 continue;
             }
             const Clip* clip = track.clipAt(t);
@@ -556,6 +556,15 @@ void Player::audioLoop()
     std::vector<TrackMix*> active;
     std::vector<float> mix;
 
+    // When any audio track is soloed, only soloed tracks are audible.
+    bool anySolo = false;
+    for (std::size_t i = 0; i < m_seq.trackCount(); ++i) {
+        if (m_seq.track(i).kind() == Track::Kind::Audio && m_seq.track(i).soloed()) {
+            anySolo = true;
+            break;
+        }
+    }
+
     Tick segStart = m_startTick;
     while (!m_stop && segStart < seqEnd) {
         const Tick segEnd = nextCut(cuts, segStart, seqEnd);
@@ -567,6 +576,9 @@ void Player::audioLoop()
             const Track& track = m_seq.track(i);
             if (track.kind() != Track::Kind::Audio) {
                 continue;
+            }
+            if (track.muted() || (anySolo && !track.soloed())) {
+                continue;  // inaudible
             }
             const Clip* clip = track.clipAt(segStart);
             if (!clip) {
@@ -754,7 +766,7 @@ void Player::beginPreview()
     // Position each active video track's decoder at the playhead and grab that frame.
     for (std::size_t i = 0; i < m_seq.trackCount(); ++i) {
         const Track& track = m_seq.track(i);
-        if (track.kind() != Track::Kind::Video) {
+        if (track.kind() != Track::Kind::Video || !track.visible()) {
             continue;
         }
         const Clip* clip = track.clipAt(t);
@@ -842,7 +854,7 @@ const VideoFrame& Player::scrubComposite(Tick t)
         const Tick fwdLimit = ticksFromSeconds(1.5);  // decode forward for small steps; reseek for jumps
         for (std::size_t i = 0; i < m_seq.trackCount(); ++i) {
             const Track& track = m_seq.track(i);
-            if (track.kind() != Track::Kind::Video) {
+            if (track.kind() != Track::Kind::Video || !track.visible()) {
                 continue;
             }
             const Clip* clip = track.clipAt(t);

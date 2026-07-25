@@ -44,6 +44,8 @@ constexpr int kVBarWidth = 14;      // vertical zoom-bar gutter on the right
 constexpr int kVBarMinHandle = 20;  // min handle length in px
 constexpr int kClipLabelStrip = 15;  // colored name strip at the top of a clip
 constexpr int kDividerGrab = 4;      // px around a header divider that grabs it
+constexpr int kTrackBtnSize = 15;    // header visibility/mute/solo toggle
+constexpr int kTrackBtnPad = 4;      // left inset of the first header toggle
 constexpr int kMinSection = 40;      // keep both A/V sections at least this tall
 constexpr int kSnapFrames = 5;       // clip-end snap tolerance, in frames
 constexpr double kTimelinePadSeconds = 300.0;  // empty room past the content to add clips (~5 min)
@@ -643,6 +645,101 @@ Tick TimelineWidget::clampRollDelta(Tick delta) const
     return std::clamp(delta, -std::max<Tick>(0, maxNeg), std::max<Tick>(0, maxPos));
 }
 
+QRect TimelineWidget::trackButtonRect(std::size_t track, TrackButton which) const
+{
+    if (!m_project || track >= m_project->sequence().trackCount()) {
+        return QRect();
+    }
+    const int th = trackHeightAt(track);
+    const int bs = std::min(kTrackBtnSize, th - 4);
+    if (bs < 10) {
+        return QRect();  // track too short for a legible button
+    }
+    const int y = trackTop(track) + (th - bs) / 2;
+    if (m_project->sequence().track(track).kind() == Track::Kind::Video) {
+        return which == TrackButton::Visible ? QRect(kTrackBtnPad, y, bs, bs) : QRect();
+    }
+    if (which == TrackButton::Mute) return QRect(kTrackBtnPad, y, bs, bs);
+    if (which == TrackButton::Solo) return QRect(kTrackBtnPad + bs + 3, y, bs, bs);
+    return QRect();
+}
+
+TimelineWidget::TrackButtonHit TimelineWidget::trackButtonAt(const QPoint& pos) const
+{
+    TrackButtonHit hit;
+    if (!m_project || pos.x() >= kHeaderWidth || pos.y() < kRulerHeight) {
+        return hit;
+    }
+    const int trk = trackAtY(pos.y());
+    if (trk < 0) {
+        return hit;
+    }
+    for (TrackButton b : { TrackButton::Visible, TrackButton::Mute, TrackButton::Solo }) {
+        if (trackButtonRect(static_cast<std::size_t>(trk), b).contains(pos)) {
+            hit = { b, static_cast<std::size_t>(trk) };
+            break;
+        }
+    }
+    return hit;
+}
+
+void TimelineWidget::drawTrackHeaderButtons(QPainter& painter, std::size_t track)
+{
+    const Track& t = m_project->sequence().track(track);
+    const QColor bg(52, 54, 60), glyphOn(214, 216, 222), glyphOff(120, 122, 128);
+
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    if (t.kind() == Track::Kind::Video) {
+        const QRect r = trackButtonRect(track, TrackButton::Visible);
+        if (!r.isEmpty()) {
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(bg);
+            painter.drawRoundedRect(r, 3, 3);
+            // Eye: a lens with a pupil; hidden shows a dim lens with a slash.
+            const QColor c = t.visible() ? glyphOn : glyphOff;
+            const double cx = r.center().x() + 0.5, cy = r.center().y() + 0.5;
+            const double w = r.width() * 0.62, h = r.height() * 0.40;
+            QPainterPath lens;
+            lens.moveTo(cx - w / 2, cy);
+            lens.quadTo(cx, cy - h, cx + w / 2, cy);
+            lens.quadTo(cx, cy + h, cx - w / 2, cy);
+            painter.setPen(QPen(c, 1.2));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawPath(lens);
+            if (t.visible()) {
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(c);
+                painter.drawEllipse(QPointF(cx, cy), r.width() * 0.13, r.width() * 0.13);
+            } else {
+                painter.drawLine(QPointF(cx - w / 2, cy - h), QPointF(cx + w / 2, cy + h));
+            }
+        }
+        painter.restore();
+        return;
+    }
+
+    QFont f = painter.font();
+    f.setPixelSize(9);
+    f.setBold(true);
+    painter.setFont(f);
+    auto letter = [&](TrackButton which, const QString& ch, bool on, const QColor& onBg) {
+        const QRect r = trackButtonRect(track, which);
+        if (r.isEmpty()) {
+            return;
+        }
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(on ? onBg : bg);
+        painter.drawRoundedRect(r, 3, 3);
+        painter.setPen(on ? QColor(24, 24, 26) : glyphOff);
+        painter.drawText(r, Qt::AlignCenter, ch);
+    };
+    letter(TrackButton::Mute, "M", t.muted(), QColor(198, 76, 76));
+    letter(TrackButton::Solo, "S", t.soloed(), QColor(216, 184, 86));
+    painter.restore();
+}
+
 Tick TimelineWidget::snapDrop(Tick start, Tick duration)
 {
     m_snapActive = false;
@@ -1031,6 +1128,18 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event)
         return;
     }
 
+    // Track-header playback toggles (checked before divider/clip hits).
+    if (const TrackButtonHit tb = trackButtonAt(pos); tb.kind != TrackButton::None) {
+        if (tb.kind == TrackButton::Visible) {
+            emit trackVisibilityToggled(tb.track);
+        } else if (tb.kind == TrackButton::Mute) {
+            emit trackMuteToggled(tb.track);
+        } else {
+            emit trackSoloToggled(tb.track);
+        }
+        return;
+    }
+
     // Grabbable dividers on the header column (A/V split, or a track's edge).
     const DividerHit dh = dividerHitTest(pos);
     if (dh.kind != DividerKind::None) {
@@ -1200,6 +1309,10 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event)
             } else {
                 unsetCursor();
             }
+            return;
+        }
+        if (trackButtonAt(pos).kind != TrackButton::None) {
+            setCursor(Qt::PointingHandCursor);  // header toggle
             return;
         }
         if (dividerHitTest(pos).kind != DividerKind::None) {
@@ -1809,6 +1922,7 @@ void TimelineWidget::drawTracks(QPainter& painter)
         painter.setPen(kText);
         painter.drawText(QRect(0, y, kHeaderWidth - 8, th),
                          Qt::AlignRight | Qt::AlignVCenter, QString::fromStdString(track.name()));
+        drawTrackHeaderButtons(painter, i);
 
         for (const Clip& clip : track.clips()) {
             Tick start = clip.timelineStart;
@@ -1913,6 +2027,11 @@ void TimelineWidget::drawTracks(QPainter& painter)
             }
             painter.setBrush(Qt::NoBrush);
             painter.drawRoundedRect(box, 3, 3);
+        }
+
+        // Dim a hidden video track's lane so it reads as excluded from the composite.
+        if (isVideo && !track.visible()) {
+            painter.fillRect(QRect(kHeaderWidth, y, contentRight() - kHeaderWidth, th), QColor(18, 18, 20, 150));
         }
 
         painter.setPen(kGridLine);

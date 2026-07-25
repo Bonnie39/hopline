@@ -10,7 +10,7 @@
 namespace hopline {
 namespace {
 
-constexpr int kFormatVersion = 6;  // v6: effect properties are keyframable (v5 wrote plain doubles)
+constexpr int kFormatVersion = 7;  // v7: per-track visible/muted/soloed (v6: keyframable effects)
 
 using nlohmann::json;
 
@@ -124,6 +124,9 @@ json sequenceToJson(const Sequence& seq)
         json jtrack;
         jtrack["kind"] = track.kind() == Track::Kind::Video ? "video" : "audio";
         jtrack["name"] = track.name();
+        jtrack["visible"] = track.visible();
+        jtrack["muted"] = track.muted();
+        jtrack["soloed"] = track.soloed();
         for (const Clip& clip : track.clips()) {
             jtrack["clips"].push_back(clipToJson(clip));
         }
@@ -144,6 +147,9 @@ Sequence sequenceFromJson(const json& jseq, Project& out)
     for (const json& jt : jseq.value("tracks", json::array())) {
         const auto kind = jt.value("kind", "video") == "audio" ? Track::Kind::Audio : Track::Kind::Video;
         const size_t index = seq.addTrack(kind, jt.value("name", std::string("Track")));
+        seq.track(index).setVisible(jt.value("visible", true));
+        seq.track(index).setMuted(jt.value("muted", false));
+        seq.track(index).setSoloed(jt.value("soloed", false));
         for (const json& jc : jt.value("clips", json::array())) {
             const Clip clip = clipFromJson(jc);
             seq.track(index).insert(clip);

@@ -23,6 +23,16 @@ public:
     Kind kind() const { return m_kind; }
     const std::string& name() const { return m_name; }
 
+    // Playback toggles. visible hides a video track from the composite; muted/soloed gate an
+    // audio track in the mix (any soloed track silences the un-soloed ones). Playback-only, so
+    // they mutate in place like a label.
+    bool visible() const { return m_visible; }
+    void setVisible(bool v) { m_visible = v; }
+    bool muted() const { return m_muted; }
+    void setMuted(bool m) { m_muted = m; }
+    bool soloed() const { return m_soloed; }
+    void setSoloed(bool s) { m_soloed = s; }
+
     const std::vector<Clip>& clips() const { return m_clips; }
     bool empty() const { return m_clips.empty(); }
 
@@ -49,6 +59,9 @@ public:
 private:
     Kind m_kind = Kind::Video;
     std::string m_name;
+    bool m_visible = true;
+    bool m_muted = false;
+    bool m_soloed = false;
     std::vector<Clip> m_clips;
 };
 

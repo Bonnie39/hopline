@@ -58,6 +58,9 @@ private slots:
     void onFileDropped(const QString& path, Tick start, int level);
     void onAddTrack(bool video);
     void onDeleteTrack(std::size_t trackIndex);
+    void onTrackVisibility(std::size_t trackIndex);
+    void onTrackMute(std::size_t trackIndex);
+    void onTrackSolo(std::size_t trackIndex);
     void togglePlay();
     void tick();
     void seekRelative(double seconds);
