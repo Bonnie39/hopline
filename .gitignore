@@ -1,5 +1,6 @@
 build/
 out/
+dist/
 vcpkg_installed/
 .vs/
 .vscode/
