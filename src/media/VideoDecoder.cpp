@@ -116,12 +116,17 @@ void VideoDecoder::convert(VideoFrame& out)
 
     out.width = src->width;
     out.height = src->height;
-    out.rgba.resize(static_cast<size_t>(src->width) * src->height * 4);
+    const size_t rowBytes = static_cast<size_t>(src->width) * 4;
+    const size_t needed = rowBytes * static_cast<size_t>(src->height);
+    // swscale's SIMD output can overrun a tightly-packed destination on the last row when the
+    // width isn't SIMD-aligned (e.g. 360 → 1440 bytes/row, not 64-aligned). Reserve headroom so
+    // the overrun stays inside the allocation; the logical size stays width*height*4.
+    out.rgba.reserve(needed + rowBytes + 64);
+    out.rgba.resize(needed);
 
     uint8_t* dst[4] = { out.rgba.data(), nullptr, nullptr, nullptr };
     int stride[4] = { src->width * 4, 0, 0, 0 };
     sws_scale(m_sws, src->data, src->linesize, 0, src->height, dst, stride);
-
 }
 
 double VideoDecoder::framePts() const
