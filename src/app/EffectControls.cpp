@@ -17,6 +17,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPalette>
 #include <QPixmap>
 #include <QPolygonF>
 #include <QScrollArea>
@@ -301,11 +302,17 @@ void KeyframePane::paintEvent(QPaintEvent*)
         p.setRenderHint(QPainter::Antialiasing, false);
     }
 
-    // Rubber-band.
+    // Rubber-band — match the media browser's Fusion band (from the palette highlight).
     if (m_banding) {
         const QRect r = QRect(m_bandStart, m_bandCur).normalized();
-        p.setPen(QColor(150, 180, 220, 160));
-        p.setBrush(QColor(150, 180, 220, 40));
+        const QColor hl = palette().color(QPalette::Highlight);
+        QColor fill(std::min(hl.red() / 2 + 110, 255), std::min(hl.green() / 2 + 110, 255),
+                    std::min(hl.blue() / 2 + 110, 255));
+        fill.setAlpha(80);
+        QColor border = hl.darker(120);
+        border.setAlpha(180);
+        p.setPen(border);
+        p.setBrush(fill);
         p.drawRect(r);
     }
 
@@ -674,6 +681,16 @@ EffectControls::EffectControls(QWidget* parent)
 
 void EffectControls::showNone()
 {
+    m_placeholder->setText("Select a clip to edit its effects.");
+    m_placeholder->show();
+    m_transformBox->hide();
+    m_audioBox->hide();
+    m_pane->hide();
+}
+
+void EffectControls::showMultiple()
+{
+    m_placeholder->setText("Multiple clips selected.\nSelect a single clip to edit its effects.");
     m_placeholder->show();
     m_transformBox->hide();
     m_audioBox->hide();

@@ -404,3 +404,158 @@ TEST_CASE("long undo/redo chains stay consistent", "[commands]")
         CHECK(snapshot(project) == history[i]);
     }
 }
+
+TEST_CASE("clear region trims, removes, and splits overlapping clips", "[commands]")
+{
+    Project project = seqProject();
+    CommandStack stack;
+    const MediaId source = addSource(project);
+
+    // A: [0,1000) tail-overlaps; B: [1000,2000) fully covered; C: [2000,4000) head-overlaps.
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 0, 1000))));
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 1000, 1000))));
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 2000, 2000))));
+    const Snapshot before = snapshot(project);
+
+    REQUIRE(stack.execute(project, std::make_unique<ClearRegionCommand>(0, TimeRange{ 500, 2500 })));
+    const auto& clips = project.sequence().track(0).clips();
+    REQUIRE(clips.size() == 2);
+    CHECK(clips[0].timelineStart == 0);     // A trimmed to [0,500)
+    CHECK(clips[0].duration == 500);
+    CHECK(clips[1].timelineStart == 3000);  // C trimmed to [3000,4000); B gone
+    CHECK(clips[1].duration == 1000);
+
+    stack.undo(project);
+    CHECK(snapshot(project) == before);
+}
+
+TEST_CASE("clear region punches a hole in a spanning clip", "[commands]")
+{
+    Project project = seqProject();
+    CommandStack stack;
+    const MediaId source = addSource(project);
+
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 0, 4000))));
+    const Snapshot before = snapshot(project);
+
+    REQUIRE(stack.execute(project, std::make_unique<ClearRegionCommand>(0, TimeRange{ 1000, 2000 })));
+    const auto& clips = project.sequence().track(0).clips();
+    REQUIRE(clips.size() == 2);
+    CHECK(clips[0].timelineStart == 0);        // left part [0,1000)
+    CHECK(clips[0].duration == 1000);
+    CHECK(clips[1].timelineStart == 3000);     // right part [3000,4000)
+    CHECK(clips[1].duration == 1000);
+    CHECK(clips[1].sourceIn == 3000);          // source advances with the head trim
+
+    stack.undo(project);
+    CHECK(snapshot(project) == before);
+}
+
+TEST_CASE("clear region leaves the excluded clip alone", "[commands]")
+{
+    Project project = seqProject();
+    CommandStack stack;
+    const MediaId source = addSource(project);
+
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 0, 2000))));
+    const ClipId keep = project.sequence().track(0).clips().front().id;
+
+    REQUIRE(stack.execute(project,
+                          std::make_unique<ClearRegionCommand>(0, TimeRange{ 0, 2000 },
+                                                               std::vector<ClipId>{ keep })));
+    CHECK(project.sequence().track(0).clips().size() == 1);  // excluded clip untouched
+}
+
+TEST_CASE("link joins clips into one group; undo restores", "[commands]")
+{
+    Project project = seqProject();
+    CommandStack stack;
+    const MediaId source = addSource(project);
+
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 0, 2000))));
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(1, makeClip(source, 0, 2000))));
+    const ClipId v = project.sequence().track(0).clips().front().id;
+    const ClipId a = project.sequence().track(1).clips().front().id;
+    CHECK_FALSE(project.sequence().findClip(v)->linked());
+
+    REQUIRE(stack.execute(project, std::make_unique<LinkClipsCommand>(
+                                       std::vector<std::pair<size_t, ClipId>>{ { 0, v }, { 1, a } })));
+    const LinkGroup g = project.sequence().findClip(v)->linkGroup;
+    CHECK(g != kNoLink);
+    CHECK(project.sequence().findClip(a)->linkGroup == g);
+
+    stack.undo(project);
+    CHECK_FALSE(project.sequence().findClip(v)->linked());
+    CHECK_FALSE(project.sequence().findClip(a)->linked());
+}
+
+TEST_CASE("roll edit moves the shared boundary; undo restores", "[commands]")
+{
+    Project project = seqProject();
+    CommandStack stack;
+    const MediaId source = addSource(project);
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 0, 1000, 0))));
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 1000, 1000, 1000))));
+    const ClipId a = project.sequence().track(0).clips()[0].id;
+    const ClipId b = project.sequence().track(0).clips()[1].id;
+    const Snapshot before = snapshot(project);
+
+    REQUIRE(stack.execute(project, std::make_unique<RollEditCommand>(0, a, b, 300)));
+    const auto& clips = project.sequence().track(0).clips();
+    REQUIRE(clips.size() == 2);
+    CHECK(clips[0].duration == 1300);       // left tail extended
+    CHECK(clips[1].timelineStart == 1300);  // boundary moved right
+    CHECK(clips[1].sourceIn == 1300);       // right head advanced in source
+    CHECK(clips[1].duration == 700);
+
+    stack.undo(project);
+    CHECK(snapshot(project) == before);
+}
+
+TEST_CASE("move clips shifts a set atomically; undo restores", "[commands]")
+{
+    Project project = seqProject();
+    CommandStack stack;
+    const MediaId source = addSource(project);
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 0, 1000))));
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 1000, 1000))));
+    const ClipId a = project.sequence().track(0).clips()[0].id;
+    const ClipId b = project.sequence().track(0).clips()[1].id;
+    const Snapshot before = snapshot(project);
+
+    // Shift both right — no transient overlap despite B landing where nothing was cleared.
+    REQUIRE(stack.execute(project, std::make_unique<MoveClipsCommand>(
+                                       std::vector<std::pair<size_t, ClipId>>{ { 0, a }, { 0, b } }, 5000)));
+    const auto& clips = project.sequence().track(0).clips();
+    REQUIRE(clips.size() == 2);
+    CHECK(clips[0].timelineStart == 5000);
+    CHECK(clips[1].timelineStart == 6000);
+
+    stack.undo(project);
+    CHECK(snapshot(project) == before);
+}
+
+TEST_CASE("clear region clears a linked clip as a whole across tracks", "[commands]")
+{
+    Project project = seqProject();
+    CommandStack stack;
+    const MediaId source = addSource(project);
+
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 0, 2000))));
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(1, makeClip(source, 0, 2000))));
+    const ClipId v = project.sequence().track(0).clips().front().id;
+    const ClipId a = project.sequence().track(1).clips().front().id;
+    REQUIRE(stack.execute(project, std::make_unique<LinkClipsCommand>(
+                                       std::vector<std::pair<size_t, ClipId>>{ { 0, v }, { 1, a } })));
+    const Snapshot before = snapshot(project);
+
+    // Clear the tail on the VIDEO track only; the linked AUDIO half must trim too.
+    REQUIRE(stack.execute(project, std::make_unique<ClearRegionCommand>(0, TimeRange{ 1000, 2000 })));
+    REQUIRE(project.sequence().track(0).clips().size() == 1);
+    REQUIRE(project.sequence().track(1).clips().size() == 1);
+    CHECK(project.sequence().track(0).clips().front().duration == 1000);
+    CHECK(project.sequence().track(1).clips().front().duration == 1000);
+
+    stack.undo(project);
+    CHECK(snapshot(project) == before);
+}

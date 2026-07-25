@@ -20,10 +20,6 @@ QPixmap toolIcon(int tool)
     pm.fill(Qt::transparent);
     QPainter p(&pm);
     p.setRenderHint(QPainter::Antialiasing);
-
-    QPen stroke(kToolColor, 2);
-    stroke.setJoinStyle(Qt::RoundJoin);
-    stroke.setCapStyle(Qt::RoundCap);
     p.setPen(Qt::NoPen);
     p.setBrush(kToolColor);
 
@@ -41,38 +37,28 @@ QPixmap toolIcon(int tool)
         p.drawPath(path);
         break;
     }
-    case ToolboxWidget::Razor: {
-        QPainterPath blade;  // angled blade
-        blade.moveTo(4, 4);
-        blade.lineTo(15, 5);
-        blade.lineTo(13, 11);
-        blade.lineTo(4, 11);
-        blade.closeSubpath();
-        p.drawPath(blade);
-        p.setPen(stroke);  // handle
-        p.setBrush(Qt::NoBrush);
-        p.drawLine(6, 12, 6, 19);
+    case ToolboxWidget::Blade: {
+        p.save();  // an angled razor blade
+        p.translate(11, 11);
+        p.rotate(-30);
+        p.drawRoundedRect(QRectF(-8, -5.5, 15, 8), 1.5, 1.5);   // blade body
+        p.setBrush(QColor(24, 25, 27));
+        p.drawEllipse(QPointF(-4.5, -1.5), 1.3, 1.3);           // mounting hole
+        p.setPen(QPen(QColor(250, 250, 250), 1.6, Qt::SolidLine, Qt::RoundCap));
+        p.drawLine(QPointF(-8, 2.5), QPointF(7, 2.5));          // cutting edge
+        p.restore();
         break;
     }
-    case ToolboxWidget::Hand: {
-        for (int i = 0; i < 4; ++i)  // fingers
-            p.drawRoundedRect(QRectF(5.0 + i * 3.0, 4, 2.4, 8), 1, 1);
-        p.drawRoundedRect(QRectF(4, 10, 12, 8), 3, 3);  // palm
-        p.drawRoundedRect(QRectF(2, 11, 3, 5), 1.5, 1.5);  // thumb
-        break;
-    }
-    case ToolboxWidget::Zoom: {
-        p.setPen(stroke);
-        p.setBrush(Qt::NoBrush);
-        p.drawEllipse(QPointF(9, 9), 5, 5);
-        p.drawLine(12.5, 12.5, 19, 19);
+    case ToolboxWidget::Text: {
+        p.drawRoundedRect(QRectF(4, 4, 14, 3.2), 1, 1);   // top bar of a "T"
+        p.drawRoundedRect(QRectF(9.4, 4, 3.2, 14), 1, 1);  // stem
         break;
     }
     }
     return pm;
 }
 
-const char* kTips[] = { "Selection", "Razor", "Hand", "Zoom" };
+const char* kTips[] = { "Selection (V)", "Blade (C)", "Text (T)" };
 
 }  // namespace
 
@@ -83,10 +69,10 @@ ToolboxWidget::ToolboxWidget(QWidget* parent)
     layout->setContentsMargins(3, 5, 3, 5);
     layout->setSpacing(3);
 
-    auto* group = new QButtonGroup(this);
-    group->setExclusive(true);
+    m_group = new QButtonGroup(this);
+    m_group->setExclusive(true);
 
-    for (int i = 0; i <= Zoom; ++i) {
+    for (int i = 0; i <= Text; ++i) {
         auto* button = new QToolButton(this);
         button->setIcon(QIcon(toolIcon(i)));
         button->setIconSize(QSize(22, 22));
@@ -94,13 +80,20 @@ ToolboxWidget::ToolboxWidget(QWidget* parent)
         button->setAutoRaise(true);
         button->setToolTip(kTips[i]);
         if (i == Select) button->setChecked(true);
-        group->addButton(button, i);
+        m_group->addButton(button, i);
         layout->addWidget(button);
         connect(button, &QToolButton::clicked, this, [this, i] { emit toolSelected(i); });
     }
     layout->addStretch(1);
 
     setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+}
+
+void ToolboxWidget::setCurrentTool(int tool)
+{
+    if (auto* b = m_group->button(tool)) {
+        b->setChecked(true);  // checking doesn't emit clicked, so no toolSelected loop
+    }
 }
 
 }  // namespace hopline

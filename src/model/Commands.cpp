@@ -1,5 +1,7 @@
 #include "model/Commands.h"
 
+#include <algorithm>
+
 #include "model/Project.h"
 
 namespace hopline {
@@ -34,6 +36,195 @@ bool AddClipCommand::apply(Project& project)
 void AddClipCommand::undo(Project& project)
 {
     project.sequence().track(m_track).remove(m_clip.id);
+}
+
+bool ClearRegionCommand::apply(Project& project)
+{
+    Sequence& sequence = project.sequence();
+    if (m_track >= sequence.trackCount()) {
+        return false;
+    }
+
+    if (m_captured) {  // redo: reproduce the same edit deterministically
+        for (const auto& [t, c] : m_removed) {
+            sequence.track(t).remove(c.id);
+        }
+        for (const auto& [t, p] : m_pieces) {
+            project.reserveClipId(p.id);
+            sequence.track(t).insert(p);
+        }
+        return true;
+    }
+    m_captured = true;
+    if (m_region.duration <= 0) {
+        return true;
+    }
+
+    // The excluded clips (e.g. the ones being moved) and their link groups are left alone.
+    std::vector<LinkGroup> exGroups;
+    for (ClipId ex : m_exclude) {
+        if (const Clip* e = sequence.findClip(ex); e && e->linked()) {
+            exGroups.push_back(e->linkGroup);
+        }
+    }
+    auto excluded = [&](const Clip& c) {
+        if (std::find(m_exclude.begin(), m_exclude.end(), c.id) != m_exclude.end()) {
+            return true;
+        }
+        return c.linked() && std::find(exGroups.begin(), exGroups.end(), c.linkGroup) != exGroups.end();
+    };
+
+    // Clips overlapping the region on m_track, expanded to whole link groups so a linked
+    // clip is cleared as a unit (its partners on other tracks are cleared over the region too).
+    std::vector<std::pair<size_t, ClipId>> targets;
+    auto known = [&](ClipId id) {
+        for (const auto& [t, i] : targets) {
+            if (i == id) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (const Clip& c : sequence.track(m_track).clips()) {
+        if (excluded(c) || !c.range().overlaps(m_region)) {
+            continue;
+        }
+        if (c.linked()) {
+            for (const auto& member : sequence.clipsInGroup(c.linkGroup)) {
+                if (!known(member.second)) {
+                    targets.push_back(member);
+                }
+            }
+        } else if (!known(c.id)) {
+            targets.push_back({ m_track, c.id });
+        }
+    }
+
+    for (const auto& [track, id] : targets) {
+        const Clip* cp = sequence.track(track).find(id);
+        if (!cp || excluded(*cp) || !cp->range().overlaps(m_region)) {
+            continue;  // a partner may not overlap, or belongs to an excluded group
+        }
+        Clip c = *cp;
+        m_removed.push_back({ track, c });
+        sequence.track(track).remove(id);
+        if (c.timelineStart < m_region.start) {  // keep the part before the region
+            Clip left = c;
+            left.id = project.nextClipId();
+            left.duration = m_region.start - c.timelineStart;
+            m_pieces.push_back({ track, left });
+            sequence.track(track).insert(left);
+        }
+        if (c.range().end() > m_region.end()) {  // keep the part after the region
+            Clip right = c;
+            right.id = project.nextClipId();
+            right.timelineStart = m_region.end();
+            right.sourceIn = c.sourceTimeAt(m_region.end());
+            right.duration = c.range().end() - m_region.end();
+            m_pieces.push_back({ track, right });
+            sequence.track(track).insert(right);
+        }
+    }
+    return true;
+}
+
+void ClearRegionCommand::undo(Project& project)
+{
+    Sequence& sequence = project.sequence();
+    for (const auto& [t, p] : m_pieces) {
+        if (t < sequence.trackCount()) {
+            sequence.track(t).remove(p.id);
+        }
+    }
+    for (const auto& [t, c] : m_removed) {
+        if (t < sequence.trackCount()) {
+            sequence.track(t).insert(c);
+        }
+    }
+}
+
+bool MoveClipsCommand::apply(Project& project)
+{
+    Sequence& sequence = project.sequence();
+    m_originals.clear();
+    for (const auto& [track, id] : m_members) {
+        if (track >= sequence.trackCount()) {
+            return false;
+        }
+        const Clip* c = sequence.track(track).find(id);
+        if (!c) {
+            return false;
+        }
+        m_originals.push_back({ track, *c });
+    }
+
+    for (const auto& [track, c] : m_originals) {  // remove all first — no transient overlap
+        sequence.track(track).remove(c.id);
+    }
+    for (const auto& [track, orig] : m_originals) {  // validate against non-members
+        Clip moved = orig;
+        moved.timelineStart += m_delta;
+        if (!isPlaceable(project, moved) || !sequence.track(track).isFree(moved.range())) {
+            for (const auto& [t2, c2] : m_originals) {
+                sequence.track(t2).insert(c2);  // rollback
+            }
+            return false;
+        }
+    }
+    for (const auto& [track, orig] : m_originals) {
+        Clip moved = orig;
+        moved.timelineStart += m_delta;
+        sequence.track(track).insert(moved);
+    }
+    return true;
+}
+
+void MoveClipsCommand::undo(Project& project)
+{
+    Sequence& sequence = project.sequence();
+    for (const auto& [track, orig] : m_originals) {
+        sequence.track(track).remove(orig.id);
+    }
+    for (const auto& [track, orig] : m_originals) {
+        sequence.track(track).insert(orig);
+    }
+}
+
+bool LinkClipsCommand::apply(Project& project)
+{
+    if (m_members.size() < 2) {
+        return false;
+    }
+    Sequence& sequence = project.sequence();
+    if (m_group == kNoLink) {
+        m_group = project.nextLinkGroup();
+    } else {
+        project.reserveLinkGroup(m_group);  // redo: keep the original group id
+    }
+
+    m_old.clear();
+    for (const auto& [track, id] : m_members) {
+        const Clip* c = track < sequence.trackCount() ? sequence.track(track).find(id) : nullptr;
+        m_old.push_back(c ? c->linkGroup : kNoLink);
+    }
+    bool any = false;
+    for (const auto& [track, id] : m_members) {
+        if (track < sequence.trackCount() && sequence.track(track).setLinkGroup(id, m_group)) {
+            any = true;
+        }
+    }
+    return any;
+}
+
+void LinkClipsCommand::undo(Project& project)
+{
+    Sequence& sequence = project.sequence();
+    for (std::size_t i = 0; i < m_members.size(); ++i) {
+        const auto& [track, id] = m_members[i];
+        if (track < sequence.trackCount()) {
+            sequence.track(track).setLinkGroup(id, m_old[i]);
+        }
+    }
 }
 
 bool RemoveClipCommand::apply(Project& project)
@@ -82,6 +273,52 @@ void MoveClipCommand::undo(Project& project)
 {
     project.sequence().track(m_to).remove(m_id);
     project.sequence().track(m_from).insert(m_original);
+}
+
+bool RollEditCommand::apply(Project& project)
+{
+    Sequence& sequence = project.sequence();
+    if (m_track >= sequence.trackCount()) {
+        return false;
+    }
+    Track& track = sequence.track(m_track);
+    const Clip* lp = track.find(m_left);
+    const Clip* rp = track.find(m_right);
+    if (!lp || !rp) {
+        return false;
+    }
+    m_origLeft = *lp;
+    m_origRight = *rp;
+
+    Clip nl = m_origLeft;
+    nl.duration += m_delta;  // left tail
+    Clip nr = m_origRight;
+    nr.timelineStart += m_delta;  // right head (moves in source + timeline together)
+    nr.sourceIn += m_delta;
+    nr.duration -= m_delta;
+    if (!isPlaceable(project, nl) || !isPlaceable(project, nr)) {
+        return false;
+    }
+
+    track.remove(m_left);
+    track.remove(m_right);
+    if (!track.isFree(nl.range()) || !track.isFree(nr.range())) {
+        track.insert(m_origLeft);
+        track.insert(m_origRight);
+        return false;
+    }
+    track.insert(nl);
+    track.insert(nr);
+    return true;
+}
+
+void RollEditCommand::undo(Project& project)
+{
+    Track& track = project.sequence().track(m_track);
+    track.remove(m_left);
+    track.remove(m_right);
+    track.insert(m_origLeft);
+    track.insert(m_origRight);
 }
 
 bool TrimClipCommand::apply(Project& project)
@@ -222,6 +459,9 @@ bool SplitClipCommand::apply(Project& project)
     right.timelineStart = m_at;
     right.sourceIn = m_original.sourceTimeAt(m_at);
     right.duration = m_original.range().end() - m_at;
+    if (m_rightLink != kNoLink) {
+        right.linkGroup = m_rightLink;  // caller relinks the right pieces into their own group
+    }
     m_rightId = right.id;
     project.reserveClipId(m_rightId);
 

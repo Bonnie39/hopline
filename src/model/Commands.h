@@ -30,6 +30,74 @@ private:
     Clip m_clip;
 };
 
+// Overwrite support: clears a time region so a new/moved clip can occupy it — trims clips that
+// partly overlap, removes those fully covered, and splits one that spans the region (leaving the
+// parts outside). A clip that overlaps on `trackIndex` is cleared as a **whole linked clip**: its
+// partners on other tracks are cleared over the same region too. The excluded clip (e.g. the one
+// being moved) and its link group are left alone. Undo restores the originals. Always succeeds;
+// compose it before an Add/Move.
+class ClearRegionCommand : public Command {
+public:
+    ClearRegionCommand(size_t trackIndex, TimeRange region, std::vector<ClipId> exclude = {})
+        : m_track(trackIndex)
+        , m_region(region)
+        , m_exclude(std::move(exclude))
+    {
+    }
+
+    bool apply(Project& project) override;
+    void undo(Project& project) override;
+    std::string name() const override { return "Clear Region"; }
+
+private:
+    size_t m_track;
+    TimeRange m_region;
+    std::vector<ClipId> m_exclude;  // these clips and their link groups are left alone
+    bool m_captured = false;
+    std::vector<std::pair<size_t, Clip>> m_removed;  // (track, original), restored on undo
+    std::vector<std::pair<size_t, Clip>> m_pieces;   // (track, inserted remainder, new id)
+};
+
+// Moves a set of clips by the same time delta, atomically: removes them all, then re-inserts
+// them shifted (so they never transiently overlap each other during the move). Rejects if any
+// destination is unplaceable or hits a non-member clip. Compose ClearRegionCommands before it
+// to overwrite non-members. Undo restores the originals.
+class MoveClipsCommand : public Command {
+public:
+    MoveClipsCommand(std::vector<std::pair<size_t, ClipId>> members, Tick delta)
+        : m_members(std::move(members))
+        , m_delta(delta)
+    {
+    }
+
+    bool apply(Project& project) override;
+    void undo(Project& project) override;
+    std::string name() const override { return "Move Clips"; }
+
+private:
+    std::vector<std::pair<size_t, ClipId>> m_members;
+    Tick m_delta;
+    std::vector<std::pair<size_t, Clip>> m_originals;  // captured on apply
+};
+
+// Links a set of clips into one new link group. Undo restores each clip's previous group.
+class LinkClipsCommand : public Command {
+public:
+    explicit LinkClipsCommand(std::vector<std::pair<size_t, ClipId>> members)
+        : m_members(std::move(members))
+    {
+    }
+
+    bool apply(Project& project) override;
+    void undo(Project& project) override;
+    std::string name() const override { return "Link Clips"; }
+
+private:
+    std::vector<std::pair<size_t, ClipId>> m_members;
+    std::vector<LinkGroup> m_old;  // previous group of each member, captured on apply
+    LinkGroup m_group = kNoLink;
+};
+
 class RemoveClipCommand : public Command {
 public:
     RemoveClipCommand(size_t trackIndex, ClipId id)
@@ -69,6 +137,32 @@ private:
     ClipId m_id;
     Tick m_newStart;
     Clip m_original;
+};
+
+// Roll edit: moves the shared boundary between two butt-joined clips on one track — the left
+// clip's tail and the right clip's head shift together by delta (left grows / right shrinks for
+// delta > 0, and vice versa). The caller clamps delta to what both clips allow. Undo restores both.
+class RollEditCommand : public Command {
+public:
+    RollEditCommand(size_t track, ClipId left, ClipId right, Tick delta)
+        : m_track(track)
+        , m_left(left)
+        , m_right(right)
+        , m_delta(delta)
+    {
+    }
+
+    bool apply(Project& project) override;
+    void undo(Project& project) override;
+    std::string name() const override { return "Roll Edit"; }
+
+private:
+    size_t m_track;
+    ClipId m_left;
+    ClipId m_right;
+    Tick m_delta;
+    Clip m_origLeft;
+    Clip m_origRight;
 };
 
 // Trimming the head moves sourceIn and timelineStart together, so the picture
@@ -178,13 +272,16 @@ private:
     AudioLevels m_old;
 };
 
-// Splits at a timeline instant; the right-hand piece gets a fresh id.
+// Splits at a timeline instant; the right-hand piece gets a fresh id. By default it
+// keeps the original's link group; pass rightLink to put the right piece in a new group
+// (so splitting a linked V+A pair yields a left pair and a separate right pair).
 class SplitClipCommand : public Command {
 public:
-    SplitClipCommand(size_t trackIndex, ClipId id, Tick at)
+    SplitClipCommand(size_t trackIndex, ClipId id, Tick at, LinkGroup rightLink = kNoLink)
         : m_track(trackIndex)
         , m_id(id)
         , m_at(at)
+        , m_rightLink(rightLink)
     {
     }
 
@@ -198,6 +295,7 @@ private:
     size_t m_track;
     ClipId m_id;
     Tick m_at;
+    LinkGroup m_rightLink;
     Clip m_original;
     ClipId m_rightId = kInvalidClip;
 };

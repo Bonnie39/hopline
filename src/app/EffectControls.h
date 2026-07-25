@@ -60,6 +60,7 @@ public:
 
     void showClip(const FxView& view);
     void showNone();
+    void showMultiple();  // 2+ unrelated clips selected: prompt to pick one
 
 signals:
     // committing: false = live drag preview, true = final (drag release / typed / reset).

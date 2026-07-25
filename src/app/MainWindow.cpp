@@ -1,6 +1,8 @@
 #include "app/MainWindow.h"
 
 #include <algorithm>
+#include <tuple>
+#include <utility>
 
 #include <QCloseEvent>
 #include <QDockWidget>
@@ -15,6 +17,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QSettings>
+#include <QShortcut>
 #include <QShowEvent>
 #include <QStatusBar>
 #include <QStyle>
@@ -172,10 +175,15 @@ MainWindow::MainWindow(QWidget* parent)
         }
     });
     connect(m_timeline, &TimelineWidget::clipMoved, this, &MainWindow::onClipMoved);
+    connect(m_timeline, &TimelineWidget::clipsMoved, this, &MainWindow::onClipsMoved);
     connect(m_timeline, &TimelineWidget::clipTrimmed, this, &MainWindow::onClipTrimmed);
+    connect(m_timeline, &TimelineWidget::splitRequested, this, &MainWindow::onClipSplit);
+    connect(m_timeline, &TimelineWidget::clipRolled, this, &MainWindow::onClipRoll);
     connect(m_timeline, &TimelineWidget::unlinkRequested, this, &MainWindow::onUnlink);
+    connect(m_timeline, &TimelineWidget::linkRequested, this, &MainWindow::onLink);
     connect(m_timeline, &TimelineWidget::clipLabelRequested, this, &MainWindow::onClipLabel);
     connect(m_timeline, &TimelineWidget::deleteRequested, this, &MainWindow::onDeleteClip);
+    connect(m_timeline, &TimelineWidget::deleteSelectionRequested, this, &MainWindow::deleteSelection);
     connect(m_timeline, &TimelineWidget::addTrackRequested, this, &MainWindow::onAddTrack);
     connect(m_timeline, &TimelineWidget::deleteTrackRequested, this, &MainWindow::onDeleteTrack);
     connect(m_timeline, &TimelineWidget::selectionChanged, this, [this](ClipId clip) {
@@ -325,6 +333,17 @@ MainWindow::MainWindow(QWidget* parent)
     m_toolsDock->setWindowTitle(QString());
     m_toolsDock->toggleViewAction()->setText("Tools");  // keep the Window-menu label
     m_toolsDock->setFeatures(QDockWidget::DockWidgetMovable);
+
+    connect(m_toolbox, &ToolboxWidget::toolSelected, this,
+            [this](int tool) { m_timeline->setTool(static_cast<TimelineWidget::Tool>(tool)); });
+    // Tool shortcuts (V/C/T). WindowShortcut context, so a focused text field's
+    // ShortcutOverride keeps them from firing mid-typing.
+    for (auto [key, tool] : { std::pair{ Qt::Key_V, int(ToolboxWidget::Select) },
+                              { Qt::Key_C, int(ToolboxWidget::Blade) },
+                              { Qt::Key_T, int(ToolboxWidget::Text) } }) {
+        auto* sc = new QShortcut(QKeySequence(key), this);
+        connect(sc, &QShortcut::activated, this, [this, tool] { activateTool(tool); });
+    }
 
     applyDefaultLayout();
 
@@ -643,7 +662,8 @@ void MainWindow::placeMedia(MediaId media, Tick start, int level)
     const bool hadSequence = m_project.hasActiveSequence();
     ensureActiveSequence(*source);  // make (and open) a sequence if the project has none
     if (!hadSequence) {
-        start = 0;  // a clip that creates a new sequence starts at the very beginning
+        start = 0;   // a clip that creates a new sequence starts at the very beginning...
+        level = 0;   // ...on V1/A1
     }
 
     // Both halves land on the target level (mirrored), creating tracks if the drop
@@ -669,11 +689,15 @@ void MainWindow::placeMedia(MediaId media, Tick start, int level)
         clip.linkGroup = m_project.nextLinkGroup();
     }
 
+    // Overwrite any existing clips in the drop region on each target track (auto-trim).
+    const TimeRange region{ clip.timelineStart, clip.duration };
     auto compound = std::make_unique<CompoundCommand>("Add Clip");
     if (source->hasVideo && videoTrack >= 0) {
+        compound->add(std::make_unique<ClearRegionCommand>(static_cast<std::size_t>(videoTrack), region));
         compound->add(std::make_unique<AddClipCommand>(static_cast<std::size_t>(videoTrack), clip));
     }
     if (source->hasAudio && audioTrack >= 0) {
+        compound->add(std::make_unique<ClearRegionCommand>(static_cast<std::size_t>(audioTrack), region));
         compound->add(std::make_unique<AddClipCommand>(static_cast<std::size_t>(audioTrack), clip));
     }
     if (compound->empty()) {
@@ -683,7 +707,7 @@ void MainWindow::placeMedia(MediaId media, Tick start, int level)
     if (m_commands.execute(m_project, std::move(compound))) {
         commitEdit();
     } else {
-        statusBar()->showMessage("Couldn't place clip there (overlaps an existing clip)");
+        statusBar()->showMessage("Couldn't place clip there");
     }
 }
 
@@ -966,6 +990,26 @@ void MainWindow::updateEffectPanel(ClipId clip)
     m_fxVideoClip = kInvalidClip;
     m_fxAudioClip = kInvalidClip;
 
+    // 2+ clips selected that aren't a single linked clip: can't edit effects for a set.
+    const std::vector<ClipId>& selection = m_timeline->selection();
+    if (selection.size() >= 2) {
+        LinkGroup g = kNoLink;
+        bool oneLinkedClip = true;
+        for (ClipId id : selection) {
+            const Clip* c = m_project.sequence().findClip(id);
+            if (!c || !c->linked() || (g != kNoLink && c->linkGroup != g)) {
+                oneLinkedClip = false;
+                break;
+            }
+            g = c->linkGroup;
+        }
+        if (!oneLinkedClip) {
+            m_fxHasAnim = false;
+            m_effects->showMultiple();
+            return;
+        }
+    }
+
     std::size_t selTrack = 0;
     const Clip* sel = (clip != kInvalidClip && m_project.hasActiveSequence())
                           ? m_project.sequence().findClip(clip, &selTrack)
@@ -1229,7 +1273,7 @@ void MainWindow::commitEdit()
     }
 }
 
-void MainWindow::onClipMoved(std::size_t fromTrack, ClipId clip, int levelDelta, Tick newStart)
+void MainWindow::onClipMoved(std::size_t fromTrack, ClipId clip, int levelDelta, Tick newStart, bool duplicate)
 {
     const Clip* dragged = m_project.sequence().findClip(clip);
     if (!dragged) {
@@ -1248,36 +1292,140 @@ void MainWindow::onClipMoved(std::size_t fromTrack, ClipId clip, int levelDelta,
         return level;
     };
 
-    // Only the dragged clip changes track (in the timeline, video/audio move between
-    // tracks independently); linked partners keep their track and shift in time.
-    // Dragging past the outermost track creates a new one (appends don't shift
-    // existing indices, so the undo stack stays consistent).
-    if (levelDelta != 0) {
-        const bool video = m_project.sequence().track(fromTrack).kind() == Track::Kind::Video;
-        ensureTrackLevel(video, std::max(0, levelOf(fromTrack, video) + levelDelta));
-    }
+    // Duplicate: copies form one new link group (linked to each other, not the originals).
+    const LinkGroup newGroup = (duplicate && dragged->linked()) ? m_project.nextLinkGroup() : kNoLink;
 
-    auto compound = std::make_unique<CompoundCommand>("Move Clip");
+    auto compound = std::make_unique<CompoundCommand>(duplicate ? "Duplicate Clip" : "Move Clip");
     for (const auto& [track, id] : targets) {
         const Clip* member = m_project.sequence().findClip(id);
         if (!member) {
             continue;
         }
+        // Move: only the dragged clip changes track (V/A move independently). Duplicate: every
+        // copy shifts by the level so a linked pair lands on a fresh V/A layer together.
+        // Dragging past the outermost track creates one (appends don't shift existing indices).
         std::size_t toTrack = track;
-        if (id == clip && levelDelta != 0) {  // the dragged clip only
+        if (levelDelta != 0 && (duplicate || id == clip)) {
             const bool video = m_project.sequence().track(track).kind() == Track::Kind::Video;
-            const int idx = trackIndexForLevel(video, std::max(0, levelOf(track, video) + levelDelta));
+            const int lvl = std::max(0, levelOf(track, video) + levelDelta);
+            ensureTrackLevel(video, lvl);
+            const int idx = trackIndexForLevel(video, lvl);
             if (idx >= 0) {
                 toTrack = static_cast<std::size_t>(idx);
             }
         }
-        compound->add(std::make_unique<MoveClipCommand>(track, id, toTrack, member->timelineStart + timeDelta));
+
+        const Tick memberStart = member->timelineStart + timeDelta;
+        if (duplicate) {
+            Clip copy = *member;
+            copy.id = kInvalidClip;  // AddClipCommand assigns a fresh id
+            copy.timelineStart = memberStart;
+            if (copy.linked()) {
+                copy.linkGroup = newGroup;
+            }
+            // Copies overwrite whatever they land on, including the originals.
+            compound->add(std::make_unique<ClearRegionCommand>(
+                toTrack, TimeRange{ memberStart, member->duration }));
+            compound->add(std::make_unique<AddClipCommand>(toTrack, copy));
+        } else {
+            compound->add(std::make_unique<ClearRegionCommand>(
+                toTrack, TimeRange{ memberStart, member->duration }, std::vector<ClipId>{ id }));
+            compound->add(std::make_unique<MoveClipCommand>(track, id, toTrack, memberStart));
+        }
     }
 
     if (m_commands.execute(m_project, std::move(compound))) {
         commitEdit();
     } else {
         m_timeline->update();  // rejected (overlap): snap back to the model
+    }
+}
+
+void MainWindow::onClipsMoved(const std::vector<ClipId>& clips, Tick delta, bool duplicate)
+{
+    if (delta == 0 || clips.empty()) {
+        return;
+    }
+    // Expand the selection to full link groups, de-duplicated.
+    std::vector<std::pair<std::size_t, ClipId>> members;
+    auto known = [&](ClipId id) {
+        for (const auto& [t, i] : members) {
+            if (i == id) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (ClipId id : clips) {
+        std::size_t track = 0;
+        if (!m_project.sequence().findClip(id, &track)) {
+            continue;
+        }
+        for (const auto& [t, mid] : editTargets(m_project, track, id)) {
+            if (!known(mid)) {
+                members.push_back({ t, mid });
+            }
+        }
+    }
+    if (members.size() < 1) {
+        return;
+    }
+    std::vector<ClipId> memberIds;
+    for (const auto& [t, id] : members) {
+        memberIds.push_back(id);
+    }
+
+    if (duplicate) {
+        // Copy each member at +delta with fresh ids; each original link group maps to one new
+        // group so the copies are linked to each other, not to the originals.
+        std::vector<std::pair<LinkGroup, LinkGroup>> groupMap;
+        auto mapGroup = [&](LinkGroup g) {
+            for (const auto& [oldg, newg] : groupMap) {
+                if (oldg == g) {
+                    return newg;
+                }
+            }
+            const LinkGroup ng = m_project.nextLinkGroup();
+            groupMap.push_back({ g, ng });
+            return ng;
+        };
+        auto compound = std::make_unique<CompoundCommand>("Duplicate Clips");
+        for (const auto& [track, id] : members) {
+            const Clip* c = m_project.sequence().findClip(id);
+            if (!c) {
+                continue;
+            }
+            Clip copy = *c;
+            copy.id = kInvalidClip;  // AddClipCommand assigns a fresh id
+            copy.timelineStart += delta;
+            if (copy.linked()) {
+                copy.linkGroup = mapGroup(copy.linkGroup);
+            }
+            compound->add(std::make_unique<ClearRegionCommand>(
+                track, TimeRange{ copy.timelineStart, copy.duration }));  // copies overwrite, incl. originals
+            compound->add(std::make_unique<AddClipCommand>(track, copy));
+        }
+        if (m_commands.execute(m_project, std::move(compound))) {
+            commitEdit();
+        }
+        return;
+    }
+
+    // Multi-move: overwrite non-members at each destination, then move all atomically.
+    auto compound = std::make_unique<CompoundCommand>("Move Clips");
+    for (const auto& [track, id] : members) {
+        const Clip* c = m_project.sequence().findClip(id);
+        if (!c) {
+            continue;
+        }
+        compound->add(std::make_unique<ClearRegionCommand>(
+            track, TimeRange{ c->timelineStart + delta, c->duration }, memberIds));
+    }
+    compound->add(std::make_unique<MoveClipsCommand>(members, delta));
+    if (m_commands.execute(m_project, std::move(compound))) {
+        commitEdit();
+    } else {
+        m_timeline->update();
     }
 }
 
@@ -1297,11 +1445,90 @@ void MainWindow::onClipTrimmed(std::size_t trackIndex, ClipId clip, bool trimHea
     }
 }
 
+void MainWindow::onClipRoll(std::size_t trackIndex, ClipId left, ClipId right, Tick delta)
+{
+    if (delta == 0) {
+        return;
+    }
+    const Sequence& seq = m_project.sequence();
+    const Clip* L = seq.findClip(left);
+    const Clip* R = seq.findClip(right);
+    if (!L || !R) {
+        return;
+    }
+    const Tick boundary = L->range().end();
+
+    // Roll the base pair plus any linked-partner pair butt-joined at the same boundary, so a
+    // linked V+A edit point rolls together.
+    std::vector<std::tuple<std::size_t, ClipId, ClipId>> pairs;
+    pairs.push_back({ trackIndex, left, right });
+    if (L->linked() && R->linked()) {
+        for (const auto& [lt, lid] : seq.clipsInGroup(L->linkGroup)) {
+            if (lid == left) {
+                continue;
+            }
+            for (const auto& [rt, rid] : seq.clipsInGroup(R->linkGroup)) {
+                const Clip* lp = seq.findClip(lid);
+                const Clip* rp = seq.findClip(rid);
+                if (rt == lt && lp && rp && lp->range().end() == boundary && rp->timelineStart == boundary) {
+                    pairs.push_back({ lt, lid, rid });
+                }
+            }
+        }
+    }
+
+    auto compound = std::make_unique<CompoundCommand>("Roll Edit");
+    for (const auto& [t, l, r] : pairs) {
+        compound->add(std::make_unique<RollEditCommand>(t, l, r, delta));
+    }
+    if (m_commands.execute(m_project, std::move(compound))) {
+        commitEdit();
+    } else {
+        m_timeline->update();
+    }
+}
+
+void MainWindow::onClipSplit(std::size_t trackIndex, ClipId clip, Tick at)
+{
+    const auto targets = editTargets(m_project, trackIndex, clip);
+    // A linked pair splits into a left pair (the original group) and a new right pair.
+    const LinkGroup rightGroup = targets.size() > 1 ? m_project.nextLinkGroup() : kNoLink;
+
+    auto compound = std::make_unique<CompoundCommand>("Split Clip");
+    for (const auto& [track, id] : targets) {
+        compound->add(std::make_unique<SplitClipCommand>(track, id, at, rightGroup));
+    }
+    if (m_commands.execute(m_project, std::move(compound))) {
+        commitEdit();
+    }
+}
+
+void MainWindow::activateTool(int tool)
+{
+    m_toolbox->setCurrentTool(tool);  // no-op re-check is fine; doesn't re-emit
+    m_timeline->setTool(static_cast<TimelineWidget::Tool>(tool));
+}
+
 void MainWindow::onUnlink(ClipId clip)
 {
     const Clip* c = m_project.sequence().findClip(clip);
     if (c && c->linked()
         && m_commands.execute(m_project, std::make_unique<UnlinkGroupCommand>(c->linkGroup))) {
+        commitEdit();
+    }
+}
+
+void MainWindow::onLink(const std::vector<ClipId>& clips)
+{
+    std::vector<std::pair<std::size_t, ClipId>> members;
+    for (ClipId id : clips) {
+        std::size_t track = 0;
+        if (m_project.sequence().findClip(id, &track)) {
+            members.push_back({ track, id });
+        }
+    }
+    if (members.size() >= 2
+        && m_commands.execute(m_project, std::make_unique<LinkClipsCommand>(std::move(members)))) {
         commitEdit();
     }
 }
@@ -1332,10 +1559,29 @@ void MainWindow::onDeleteClip(std::size_t trackIndex, ClipId clip)
 
 void MainWindow::deleteSelection()
 {
-    const ClipId clip = m_timeline->selected();
-    std::size_t track = 0;
-    if (clip != kInvalidClip && m_project.sequence().findClip(clip, &track)) {
-        onDeleteClip(track, clip);
+    const std::vector<ClipId> sel = m_timeline->selection();
+    if (sel.empty()) {
+        return;
+    }
+    // Every selected clip plus each one's link group, de-duplicated, in one undo step.
+    auto compound = std::make_unique<CompoundCommand>("Delete Clips");
+    std::vector<ClipId> done;
+    for (ClipId clip : sel) {
+        std::size_t track = 0;
+        if (!m_project.sequence().findClip(clip, &track)) {
+            continue;
+        }
+        for (const auto& [t, id] : editTargets(m_project, track, clip)) {
+            if (std::find(done.begin(), done.end(), id) != done.end()) {
+                continue;
+            }
+            done.push_back(id);
+            compound->add(std::make_unique<RemoveClipCommand>(t, id));
+        }
+    }
+    if (m_commands.execute(m_project, std::move(compound))) {
+        m_timeline->clearSelection();
+        commitEdit();
     }
 }
 

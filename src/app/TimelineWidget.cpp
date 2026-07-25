@@ -13,6 +13,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPalette>
 #include <QPixmap>
 #include <QResizeEvent>
 #include <QUrl>
@@ -22,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <limits>
 
 #include "app/PreviewCache.h"
@@ -33,7 +35,7 @@ namespace {
 constexpr int kHeaderWidth = 72;
 constexpr int kRulerHeight = 24;
 constexpr int kDefaultTrackHeight = 56;
-constexpr int kMinTrackHeight = 16;   // ~just the clip name strip
+constexpr int kMinTrackHeight = 22;   // fits the full clip name strip (kClipLabelStrip + inset)
 constexpr int kMaxTrackHeight = 260;
 constexpr int kTrackGap = 2;
 constexpr int kTrimHandlePx = 6;
@@ -43,6 +45,8 @@ constexpr int kVBarMinHandle = 20;  // min handle length in px
 constexpr int kClipLabelStrip = 15;  // colored name strip at the top of a clip
 constexpr int kDividerGrab = 4;      // px around a header divider that grabs it
 constexpr int kMinSection = 40;      // keep both A/V sections at least this tall
+constexpr int kSnapFrames = 5;       // clip-end snap tolerance, in frames
+constexpr double kTimelinePadSeconds = 300.0;  // empty room past the content to add clips (~5 min)
 
 // Neutral shades matching the app palette; the track area is a darker "well" than
 // the surrounding panels, and the lanes carry no blue/green tint.
@@ -95,6 +99,41 @@ TimelineWidget::TimelineWidget(QWidget* parent)
     setFocusPolicy(Qt::StrongFocus);
     setMouseTracking(true);  // so the cursor can react to the trim zone without a button down
     setAcceptDrops(true);
+
+    // Blade cursor: the toolbox blade icon, with a dark outline so it reads on any clip.
+    // Hotspot at the leading tip of the cutting edge (where the cut lands).
+    QPixmap bc(28, 28);
+    bc.fill(Qt::transparent);
+    {
+        QPainter p(&bc);
+        p.setRenderHint(QPainter::Antialiasing);
+        p.translate(14, 14);
+        p.rotate(-30);
+        p.setPen(QPen(QColor(0, 0, 0, 200), 2.4));  // dark outline for contrast
+        p.setBrush(QColor(224, 226, 232));
+        p.drawRoundedRect(QRectF(-11, -7, 21, 11), 2, 2);  // blade body
+        p.setBrush(QColor(24, 25, 27));
+        p.setPen(Qt::NoPen);
+        p.drawEllipse(QPointF(-6, -2), 1.7, 1.7);          // mounting hole
+        p.setPen(QPen(QColor(250, 250, 250), 2.0, Qt::SolidLine, Qt::RoundCap));
+        p.drawLine(QPointF(-11, 2.8), QPointF(9, 2.8));    // cutting edge
+    }
+    m_bladeCursor = QCursor(bc, 6, 22);
+}
+
+void TimelineWidget::setTool(Tool tool)
+{
+    if (m_tool == tool) {
+        return;
+    }
+    m_tool = tool;
+    m_bladeClip = kInvalidClip;
+    if (m_tool == Tool::Blade) {
+        setCursor(m_bladeCursor);
+    } else {
+        unsetCursor();
+    }
+    update();
 }
 
 void TimelineWidget::setProject(const Project* project)
@@ -119,7 +158,7 @@ double TimelineWidget::viewTotal() const
 {
     double dur = 0.0;
     if (m_project) {
-        dur = secondsFromTicks(m_project->sequence().duration());
+        dur = secondsFromTicks(m_project->sequence().duration()) + kTimelinePadSeconds;
     }
     return std::max(dur, viewStart() + viewSpan());
 }
@@ -149,8 +188,9 @@ void TimelineWidget::setPlayhead(Tick time)
 
 void TimelineWidget::clearSelection()
 {
-    if (m_selected != kInvalidClip) {
+    if (m_selected != kInvalidClip || !m_selection.empty()) {
         m_selected = kInvalidClip;
+        m_selection.clear();
         emit selectionChanged(kInvalidClip);
         update();
     }
@@ -255,6 +295,12 @@ int TimelineWidget::sectionContentHeight(bool video) const
     return n > 0 ? total + (n - 1) * kTrackGap : 0;
 }
 
+int TimelineWidget::sectionMinContentHeight(bool video) const
+{
+    const int n = sectionTrackCount(video);
+    return n > 0 ? n * kMinTrackHeight + (n - 1) * kTrackGap : 0;
+}
+
 int TimelineWidget::sectionViewport(bool video) const
 {
     const TrackLayout lay = trackLayout();
@@ -277,7 +323,10 @@ void TimelineWidget::clampScrolls()
 double TimelineWidget::minPixelsPerSecond() const
 {
     const int usable = contentRight() - kHeaderWidth;
-    const double dur = m_project ? secondsFromTicks(m_project->sequence().duration()) : 0.0;
+    // Zoom-out floor fits the content plus the padding, so the empty tail is reachable.
+    const double dur = m_project
+                           ? secondsFromTicks(m_project->sequence().duration()) + kTimelinePadSeconds
+                           : 0.0;
     if (usable <= 0 || dur <= 0.0) {
         return 1.0;
     }
@@ -441,19 +490,255 @@ Tick TimelineWidget::snapDelta(Tick raw) const
     return std::llround(static_cast<double>(raw) / frame) * frame;
 }
 
+Tick TimelineWidget::snapEdges(Tick delta, bool head, bool tail)
+{
+    m_snapActive = false;
+    if (!m_project || !m_project->hasActiveSequence()) {
+        return delta;
+    }
+    const Sequence& seq = m_project->sequence();
+    const Tick frame = seq.frameDuration();
+    if (frame <= 0) {
+        return delta;
+    }
+    const Tick tol = kSnapFrames * frame;
+
+    const std::vector<ClipId> dragged = affectedByDrag();
+    // A duplicate leaves the originals in place, so the copy can still snap to them.
+    const bool excludeDragged = !m_dragDuplicate;
+    auto isDragged = [&](ClipId id) {
+        return excludeDragged && std::find(dragged.begin(), dragged.end(), id) != dragged.end();
+    };
+
+    // Snap targets: every other clip's start & end, timeline 0, and the playhead.
+    std::vector<Tick> targets{ 0, m_playhead };
+    for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+        for (const Clip& c : seq.track(i).clips()) {
+            if (isDragged(c.id)) {
+                continue;
+            }
+            targets.push_back(c.timelineStart);
+            targets.push_back(c.range().end());
+        }
+    }
+
+    // Closest target within tolerance of any moving edge wins.
+    Tick best = 0;
+    Tick bestDist = tol + 1;
+    Tick bestTarget = 0;
+    for (ClipId id : dragged) {
+        const Clip* c = seq.findClip(id);
+        if (!c) {
+            continue;
+        }
+        Tick edges[2];
+        int n = 0;
+        if (head) {
+            edges[n++] = c->timelineStart + delta;
+        }
+        if (tail) {
+            edges[n++] = c->range().end() + delta;
+        }
+        for (int e = 0; e < n; ++e) {
+            for (Tick t : targets) {
+                const Tick d = t - edges[e];
+                if (std::llabs(d) <= tol && std::llabs(d) < bestDist) {
+                    bestDist = std::llabs(d);
+                    best = d;
+                    bestTarget = t;
+                }
+            }
+        }
+    }
+    if (bestDist <= tol) {
+        m_snapActive = true;
+        m_snapTick = bestTarget;
+    }
+    return delta + best;
+}
+
+TimelineWidget::RollHit TimelineWidget::rollHitTest(const QPoint& pos) const
+{
+    RollHit r;
+    if (!m_project || pos.x() < kHeaderWidth || pos.x() >= contentRight() || pos.y() < kRulerHeight) {
+        return r;
+    }
+    const int trk = trackAtY(pos.y());
+    if (trk < 0) {
+        return r;
+    }
+    const auto& clips = m_project->sequence().track(trk).clips();  // sorted by start
+    for (std::size_t i = 1; i < clips.size(); ++i) {
+        const Clip& a = clips[i - 1];
+        const Clip& b = clips[i];
+        if (a.range().end() != b.timelineStart) {
+            continue;  // only butt-joined clips can roll
+        }
+        if (std::abs(pos.x() - xForTick(a.range().end())) <= kTrimHandlePx) {
+            r.valid = true;
+            r.track = static_cast<std::size_t>(trk);
+            r.left = a.id;
+            r.right = b.id;
+            r.boundary = a.range().end();
+            return r;
+        }
+    }
+    return r;
+}
+
+void TimelineWidget::buildRollPairs()
+{
+    m_rollPairs.clear();
+    if (!m_project) {
+        return;
+    }
+    const Sequence& seq = m_project->sequence();
+    m_rollPairs.push_back({ true, m_rollTrack, m_rollLeft, m_rollRight, m_rollBoundary });
+
+    // Add any linked-partner boundary butt-joined at the same tick (mirrors onClipRoll).
+    const Clip* L = seq.findClip(m_rollLeft);
+    const Clip* R = seq.findClip(m_rollRight);
+    if (!L || !R || !L->linked() || !R->linked()) {
+        return;
+    }
+    for (const auto& [lt, lid] : seq.clipsInGroup(L->linkGroup)) {
+        if (lid == m_rollLeft) {
+            continue;
+        }
+        for (const auto& [rt, rid] : seq.clipsInGroup(R->linkGroup)) {
+            const Clip* lp = seq.findClip(lid);
+            const Clip* rp = seq.findClip(rid);
+            if (rt == lt && lp && rp && lp->range().end() == m_rollBoundary
+                && rp->timelineStart == m_rollBoundary) {
+                m_rollPairs.push_back({ true, lt, lid, rid, m_rollBoundary });
+            }
+        }
+    }
+}
+
+Tick TimelineWidget::clampRollDelta(Tick delta) const
+{
+    if (!m_project || m_rollPairs.empty()) {
+        return 0;
+    }
+    const Sequence& seq = m_project->sequence();
+    const Tick minDur = seq.frameDuration();
+    Tick maxPos = std::numeric_limits<Tick>::max();
+    Tick maxNeg = std::numeric_limits<Tick>::max();
+    // Clamp by whichever pair runs out first.
+    for (const RollHit& p : m_rollPairs) {
+        const Clip* L = seq.findClip(p.left);
+        const Clip* R = seq.findClip(p.right);
+        const MediaSource* Lm = L ? m_project->media(L->source) : nullptr;
+        const MediaSource* Rm = R ? m_project->media(R->source) : nullptr;
+        if (!L || !R || !Lm || !Rm) {
+            return 0;
+        }
+        // delta > 0: left extends its tail (needs source room), right trims its head (min dur).
+        maxPos = std::min(maxPos, std::min(Lm->duration - (L->sourceIn + L->duration),
+                                           R->duration - minDur));
+        // delta < 0: left trims its tail (min dur), right extends its head (source before in).
+        maxNeg = std::min(maxNeg, std::min(L->duration - minDur, R->sourceIn));
+    }
+    return std::clamp(delta, -std::max<Tick>(0, maxNeg), std::max<Tick>(0, maxPos));
+}
+
+Tick TimelineWidget::snapDrop(Tick start, Tick duration)
+{
+    m_snapActive = false;
+    if (!m_project || !m_project->hasActiveSequence()) {
+        return start;
+    }
+    const Sequence& seq = m_project->sequence();
+    const Tick frame = seq.frameDuration();
+    if (frame <= 0) {
+        return start;
+    }
+    const Tick tol = kSnapFrames * frame;
+
+    std::vector<Tick> targets{ 0, m_playhead };  // every existing clip end, 0, and the playhead
+    for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+        for (const Clip& c : seq.track(i).clips()) {
+            targets.push_back(c.timelineStart);
+            targets.push_back(c.range().end());
+        }
+    }
+
+    const Tick edges[2] = { start, start + duration };
+    Tick best = 0;
+    Tick bestDist = tol + 1;
+    Tick bestTarget = 0;
+    for (Tick edge : edges) {
+        for (Tick t : targets) {
+            const Tick d = t - edge;
+            if (std::llabs(d) <= tol && std::llabs(d) < bestDist) {
+                bestDist = std::llabs(d);
+                best = d;
+                bestTarget = t;
+            }
+        }
+    }
+    if (bestDist <= tol) {
+        m_snapActive = true;
+        m_snapTick = bestTarget;
+    }
+    return start + best;
+}
+
+std::vector<ClipId> TimelineWidget::clipsInRect(const QRect& r) const
+{
+    std::vector<ClipId> ids;
+    if (!m_project || !m_project->hasActiveSequence()) {
+        return ids;
+    }
+    const Sequence& seq = m_project->sequence();
+    for (std::size_t i = 0; i < seq.trackCount(); ++i) {
+        const int y = trackTop(i);
+        const int th = trackHeightAt(i);
+        if (!r.intersects(QRect(kHeaderWidth, y, contentRight() - kHeaderWidth, th))) {
+            continue;
+        }
+        for (const Clip& c : seq.track(i).clips()) {
+            const int x0 = std::max(xForTick(c.timelineStart), kHeaderWidth);
+            const int x1 = xForTick(c.range().end());
+            if (r.intersects(QRect(x0, y, std::max(1, x1 - x0), th))) {
+                ids.push_back(c.id);
+            }
+        }
+    }
+    return ids;
+}
+
 std::vector<ClipId> TimelineWidget::affectedByDrag() const
 {
     std::vector<ClipId> ids;
-    if (!m_project || m_dragClip == kInvalidClip) {
+    if (!m_project) {
         return ids;
     }
-    const Clip* clip = m_project->sequence().findClip(m_dragClip);
-    if (clip && clip->linked()) {
-        for (const auto& [track, id] : m_project->sequence().clipsInGroup(clip->linkGroup)) {
+    auto add = [&](ClipId id) {
+        if (std::find(ids.begin(), ids.end(), id) == ids.end()) {
             ids.push_back(id);
         }
-    } else {
-        ids.push_back(m_dragClip);
+    };
+    auto addGroup = [&](ClipId seed) {
+        const Clip* c = m_project->sequence().findClip(seed);
+        if (c && c->linked()) {
+            for (const auto& [track, id] : m_project->sequence().clipsInGroup(c->linkGroup)) {
+                add(id);
+            }
+        } else if (c) {
+            add(seed);
+        }
+    };
+
+    if (m_multiMove) {  // multi-clip move / duplicate: the whole selection + link groups
+        for (ClipId sel : m_selection) {
+            addGroup(sel);
+        }
+        return ids;
+    }
+    if (m_dragClip != kInvalidClip) {
+        addGroup(m_dragClip);
     }
     return ids;
 }
@@ -512,13 +797,157 @@ Tick TimelineWidget::clampTrimDelta(Tick delta, bool trimHead) const
 
 void TimelineWidget::updateHoverCursor(const QPoint& pos)
 {
-    // Only the trim edges get a custom cursor; the body keeps the default arrow.
+    // A joined boundary rolls (takes priority over trim); trim edges get the resize cursor.
+    if (m_tool == Tool::Select && rollHitTest(pos).valid) {
+        setCursor(Qt::SplitHCursor);
+        return;
+    }
     const Hit hit = hitTest(pos);
     if (hit.onClip && (hit.edge == 0 || hit.edge == 1)) {
         setCursor(Qt::SizeHorCursor);
     } else {
         unsetCursor();
     }
+}
+
+void TimelineWidget::updateBladeHover(const QPoint& pos)
+{
+    const ClipId prevClip = m_bladeClip;
+    const Tick prevAt = m_bladeAt;
+    const bool prevOnPh = m_bladeOnPlayhead;
+    m_bladeOnPlayhead = false;
+    const Hit hit = hitTest(pos);
+    if (hit.onClip && m_project) {
+        m_bladeClip = hit.clip;
+        m_bladeTrack = hit.trackIndex;
+        const Sequence& seq = m_project->sequence();
+        Tick at = seq.snapToFrame(tickForX(pos.x()));
+        if (const Clip* c = seq.findClip(hit.clip)) {
+            at = std::clamp(at, c->timelineStart, c->range().end());  // keep the line inside the clip
+            // Snap to the playhead when it's within ~a frame and inside the clip.
+            const Tick frame = seq.frameDuration();
+            if (m_playhead > c->timelineStart && m_playhead < c->range().end()
+                && std::llabs(at - m_playhead) <= frame) {
+                at = m_playhead;
+                m_bladeOnPlayhead = true;
+            }
+        }
+        m_bladeAt = at;
+    } else {
+        m_bladeClip = kInvalidClip;
+    }
+    setCursor(m_bladeCursor);
+    if (m_bladeClip != prevClip || m_bladeAt != prevAt || m_bladeOnPlayhead != prevOnPh) {
+        update();
+    }
+}
+
+void TimelineWidget::leaveEvent(QEvent*)
+{
+    bool changed = false;
+    if (m_bladeClip != kInvalidClip) {
+        m_bladeClip = kInvalidClip;
+        changed = true;
+    }
+    if (m_hoverX != -1) {
+        m_hoverX = -1;
+        changed = true;
+    }
+    if (changed) {
+        update();
+    }
+}
+
+void TimelineWidget::drawBladeHover(QPainter& painter)
+{
+    if (m_tool != Tool::Blade || m_bladeClip == kInvalidClip || !m_project) {
+        return;
+    }
+    const int x = xForTick(m_bladeAt);
+    if (x < kHeaderWidth || x >= contentRight()) {
+        return;
+    }
+    const Sequence& seq = m_project->sequence();
+    const Clip* hovered = seq.findClip(m_bladeClip);
+    if (!hovered) {
+        return;
+    }
+
+    // The blade cuts the hovered clip and every clip linked to it — show the line on each.
+    std::vector<std::pair<std::size_t, ClipId>> members;
+    if (hovered->linked()) {
+        members = seq.clipsInGroup(hovered->linkGroup);
+    } else {
+        members = { { m_bladeTrack, m_bladeClip } };
+    }
+
+    const TrackLayout lay = trackLayout();
+    painter.setPen(QPen(QColor(245, 245, 245), 1));
+    for (const auto& [track, id] : members) {
+        if (track >= seq.trackCount()) {
+            continue;
+        }
+        const Clip* c = seq.findClip(id);
+        if (!c || m_bladeAt <= c->timelineStart || m_bladeAt >= c->range().end()) {
+            continue;  // cut not inside this member
+        }
+        const bool video = seq.track(track).kind() == Track::Kind::Video;
+        const QRect sectionRect = video ? QRect(0, kRulerHeight, contentRight(), lay.dividerY - kRulerHeight)
+                                        : QRect(0, lay.dividerY, contentRight(), height() - lay.dividerY);
+        const int y = trackTop(track);
+        const int th = trackHeightAt(track);
+        painter.save();
+        painter.setClipRect(sectionRect);
+        painter.drawLine(x, y + 3, x, y + th - 3);
+        painter.restore();
+    }
+
+    // Snapped to the playhead: flank the cut with small triangles (the red playhead line
+    // is drawn over the white cut line, so these read the snap).
+    if (m_bladeOnPlayhead) {
+        const int ty = kRulerHeight + 1;
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(245, 245, 245));
+        QPolygonF lt;
+        lt << QPointF(x - 7, ty) << QPointF(x - 1, ty + 5) << QPointF(x - 7, ty + 10);
+        QPolygonF rt;
+        rt << QPointF(x + 7, ty) << QPointF(x + 1, ty + 5) << QPointF(x + 7, ty + 10);
+        painter.drawPolygon(lt);
+        painter.drawPolygon(rt);
+        painter.setRenderHint(QPainter::Antialiasing, false);
+    }
+}
+
+void TimelineWidget::drawBand(QPainter& painter)
+{
+    if (m_drag != Drag::Band || !m_dragMoved) {
+        return;
+    }
+    // Match the media browser's Fusion rubber band (derived from the palette highlight).
+    const QColor hl = palette().color(QPalette::Highlight);
+    QColor fill(std::min(hl.red() / 2 + 110, 255), std::min(hl.green() / 2 + 110, 255),
+                std::min(hl.blue() / 2 + 110, 255));
+    fill.setAlpha(80);
+    QColor border = hl.darker(120);
+    border.setAlpha(180);
+    painter.setPen(border);
+    painter.setBrush(fill);
+    painter.drawRect(m_bandRect);
+}
+
+void TimelineWidget::drawSnapIndicator(QPainter& painter)
+{
+    const bool dragging = (m_drag == Drag::Move || m_drag == Drag::TrimHead || m_drag == Drag::TrimTail);
+    if ((!dragging && !m_dropActive) || !m_snapActive) {
+        return;
+    }
+    const int x = xForTick(m_snapTick);
+    if (x < kHeaderWidth || x >= contentRight()) {
+        return;
+    }
+    painter.setPen(QPen(QColor(120, 205, 245), 1));  // snap line, across the tracks
+    painter.drawLine(x, kRulerHeight, x, height());
 }
 
 void TimelineWidget::scrubTo(int x)
@@ -615,6 +1044,24 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event)
         return;
     }
 
+    // A shared boundary between two joined clips → roll edit (Select tool only).
+    if (m_tool == Tool::Select) {
+        const RollHit rh = rollHitTest(pos);
+        if (rh.valid) {
+            m_drag = Drag::Roll;
+            m_rollTrack = rh.track;
+            m_rollLeft = rh.left;
+            m_rollRight = rh.right;
+            m_rollBoundary = rh.boundary;
+            buildRollPairs();
+            m_previewDelta = 0;
+            m_pressX = pos.x();
+            m_dragMoved = false;
+            setCursor(Qt::SplitHCursor);
+            return;
+        }
+    }
+
     const Hit hit = hitTest(pos);
 
     if (hit.onRuler) {
@@ -625,10 +1072,44 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event)
     }
 
     if (hit.onClip) {
-        if (m_selected != hit.clip) {
-            m_selected = hit.clip;
-            emit selectionChanged(m_selected);
+        if (m_tool == Tool::Blade) {  // cut at the cursor instead of selecting/dragging
+            const Tick at = m_project->sequence().snapToFrame(tickForX(pos.x()));
+            emit splitRequested(hit.trackIndex, hit.clip, at);
+            return;
         }
+
+        const bool inSelection =
+            std::find(m_selection.begin(), m_selection.end(), hit.clip) != m_selection.end();
+
+        // Shift+click toggles this clip in the selection (no drag).
+        if (event->modifiers() & Qt::ShiftModifier) {
+            if (inSelection) {
+                m_selection.erase(std::remove(m_selection.begin(), m_selection.end(), hit.clip),
+                                  m_selection.end());
+                if (m_selected == hit.clip) {
+                    m_selected = m_selection.empty() ? kInvalidClip : m_selection.front();
+                }
+            } else {
+                m_selection.push_back(hit.clip);
+                m_selected = hit.clip;
+            }
+            emit selectionChanged(m_selected);
+            update();
+            return;
+        }
+
+        const bool isTrim = (hit.edge == 0 || hit.edge == 1);
+        // A body press inside a 2+ selection keeps the whole set and moves it together.
+        const bool keepMulti = !isTrim && inSelection && m_selection.size() >= 2;
+        if (!keepMulti) {
+            const bool changed = (m_selected != hit.clip) || (m_selection.size() != 1);
+            m_selected = hit.clip;
+            m_selection = { hit.clip };
+            if (changed) {
+                emit selectionChanged(m_selected);
+            }
+        }
+
         m_dragTrack = hit.trackIndex;
         m_dragClip = hit.clip;
         if (const Clip* clip = m_project->sequence().findClip(hit.clip)) {
@@ -636,6 +1117,10 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event)
             m_dragOrigDuration = clip->duration;
         }
         m_drag = hit.edge == 0 ? Drag::TrimHead : hit.edge == 1 ? Drag::TrimTail : Drag::Move;
+        m_dragDuplicate = (m_drag == Drag::Move) && (event->modifiers() & Qt::AltModifier);
+        // A 2+ selection moves as a set, time-only. A single clip (move or duplicate) still
+        // gets the vertical level delta, so Alt-drag can copy onto another track.
+        m_multiMove = (m_drag == Drag::Move) && keepMulti;
         if (m_drag != Drag::Move) {
             setCursor(Qt::SizeHorCursor);  // trim only; moving keeps the default cursor
         }
@@ -647,12 +1132,26 @@ void TimelineWidget::mousePressEvent(QMouseEvent* event)
         return;
     }
 
-    clearSelection();
+    // Empty area: start a rubber-band selection. A click with no drag clears (on release).
+    m_drag = Drag::Band;
+    m_bandOrigin = pos;
+    m_bandRect = QRect(pos, pos);
+    m_dragMoved = false;
 }
 
 void TimelineWidget::mouseMoveEvent(QMouseEvent* event)
 {
     const QPoint pos = event->position().toPoint();
+
+    // Ruler hover dash: a mark at the mouse's time, so you can see where a ruler click
+    // would drop the playhead. Hidden while scrubbing (the playhead already shows it).
+    const int hx = (pos.x() >= kHeaderWidth && pos.x() < contentRight() && m_drag != Drag::Scrub)
+                       ? pos.x()
+                       : -1;
+    if (hx != m_hoverX) {
+        m_hoverX = hx;
+        update();
+    }
 
     if (m_drag == Drag::Scrub) {
         scrubTo(pos.x());
@@ -674,7 +1173,22 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event)
         updateDividerDrag(pos.y());
         return;
     }
+    if (m_drag == Drag::Band) {
+        m_bandRect = QRect(m_bandOrigin, pos).normalized();
+        if (std::abs(pos.x() - m_bandOrigin.x()) > kDragThresholdPx
+            || std::abs(pos.y() - m_bandOrigin.y()) > kDragThresholdPx) {
+            m_dragMoved = true;
+        }
+        update();
+        return;
+    }
     if (m_drag == Drag::None) {
+        // Blade tool over a clip lane: show the cut-preview line instead of hover cursors.
+        if (m_tool == Tool::Blade && pos.x() >= kHeaderWidth && pos.x() < contentRight()
+            && pos.y() >= kRulerHeight) {
+            updateBladeHover(pos);
+            return;
+        }
         // Over a vertical bar: knobs zoom (pointing hand), body scrolls (arrow).
         if (pos.x() >= contentRight() && pos.y() >= kRulerHeight && m_project
             && m_project->hasActiveSequence()) {
@@ -704,10 +1218,10 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event)
     Tick delta = snapDelta(ticksFromSeconds(dxPixels / m_pixelsPerSecond));
     switch (m_drag) {
     case Drag::Move: {
-        delta = clampMoveDelta(delta);
-        // Vertical: how many track-levels (in the dragged clip's kind) the cursor
-        // has crossed. The move mirrors this across every linked member's kind.
-        if (m_project && m_dragTrack < m_project->sequence().trackCount()) {
+        delta = clampMoveDelta(snapEdges(delta, true, true));
+        // Vertical: how many track-levels (in the dragged clip's kind) the cursor has
+        // crossed. Only single-clip moves change track; multi-move/duplicate are time-only.
+        if (!m_multiMove && m_project && m_dragTrack < m_project->sequence().trackCount()) {
             const bool video = m_project->sequence().track(m_dragTrack).kind() == Track::Kind::Video;
             m_dragLevelDelta = levelForY(pos.y(), video) - levelOfTrack(m_dragTrack);
             if (m_dragLevelDelta != 0) {
@@ -717,10 +1231,13 @@ void TimelineWidget::mouseMoveEvent(QMouseEvent* event)
         break;
     }
     case Drag::TrimHead:
-        delta = clampTrimDelta(delta, true);
+        delta = clampTrimDelta(snapEdges(clampTrimDelta(delta, true), true, false), true);
         break;
     case Drag::TrimTail:
-        delta = clampTrimDelta(delta, false);
+        delta = clampTrimDelta(snapEdges(clampTrimDelta(delta, false), false, true), false);
+        break;
+    case Drag::Roll:
+        delta = clampRollDelta(delta);
         break;
     default:
         break;
@@ -755,6 +1272,20 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event)
         return;
     }
 
+    if (m_drag == Drag::Band) {
+        if (m_dragMoved) {  // a real drag selects; a bare click clears
+            m_selection = clipsInRect(m_bandRect);
+            m_selected = m_selection.empty() ? kInvalidClip : m_selection.front();
+            emit selectionChanged(m_selected);
+        } else {
+            clearSelection();
+        }
+        m_drag = Drag::None;
+        m_dragMoved = false;
+        update();
+        return;
+    }
+
     const bool moved = m_previewDelta != 0 || (m_drag == Drag::Move && m_dragLevelDelta != 0);
     if (m_drag != Drag::None && m_drag != Drag::Scrub && m_dragMoved && moved) {
         commitDrag();
@@ -766,8 +1297,16 @@ void TimelineWidget::mouseReleaseEvent(QMouseEvent* event)
     m_drag = Drag::None;
     m_previewDelta = 0;
     m_dragLevelDelta = 0;
+    m_multiMove = false;
+    m_dragDuplicate = false;
     m_dragClip = kInvalidClip;
-    updateHoverCursor(event->position().toPoint());
+    m_rollPairs.clear();
+    m_snapActive = false;
+    if (m_tool == Tool::Blade) {
+        setCursor(m_bladeCursor);
+    } else {
+        updateHoverCursor(event->position().toPoint());
+    }
     update();
 }
 
@@ -775,13 +1314,21 @@ void TimelineWidget::commitDrag()
 {
     switch (m_drag) {
     case Drag::Move:
-        emit clipMoved(m_dragTrack, m_dragClip, m_dragLevelDelta, m_dragOrigStart + m_previewDelta);
+        if (m_multiMove) {
+            emit clipsMoved(m_selection, m_previewDelta, m_dragDuplicate);
+        } else {
+            emit clipMoved(m_dragTrack, m_dragClip, m_dragLevelDelta,
+                           m_dragOrigStart + m_previewDelta, m_dragDuplicate);
+        }
         break;
     case Drag::TrimHead:
         emit clipTrimmed(m_dragTrack, m_dragClip, true, m_previewDelta);
         break;
     case Drag::TrimTail:
         emit clipTrimmed(m_dragTrack, m_dragClip, false, m_previewDelta);
+        break;
+    case Drag::Roll:
+        emit clipRolled(m_rollTrack, m_rollLeft, m_rollRight, m_previewDelta);
         break;
     default:
         break;
@@ -804,7 +1351,9 @@ void TimelineWidget::updateVDrag(int y)
         if (contentH <= viewport) {
             return;  // everything fits; nothing to scroll
         }
-        const double dContent = static_cast<double>(y - m_vPressY) / barH * contentH;
+        const int len = vbarHandle(video).height();
+        const double travel = std::max(1, barH - len);  // px the thumb sweeps over the full scroll
+        const double dContent = static_cast<double>(y - m_vPressY) / travel * (contentH - viewport);
         const double pressWindowTop = video ? (contentH - viewport - m_vPressScroll) : m_vPressScroll;
         const double windowTop = std::clamp(pressWindowTop + dContent, 0.0, contentH - viewport);
         if (video) {
@@ -826,8 +1375,10 @@ void TimelineWidget::updateVDrag(int y)
             lenPx = m_vPressHandleBottom - newTop;
             anchorFrac = static_cast<double>(m_vPressHandleBottom - bar.top()) / barH;
         }
+        // Full handle = fully zoomed out (all tracks at min height); floor scales with count.
         const double frac = std::clamp(lenPx / barH, 1e-3, 1.0);
-        const double desiredContentH = viewport / frac;
+        const double minCH = std::max(1.0, static_cast<double>(sectionMinContentHeight(video)));
+        const double desiredContentH = minCH / frac;
         // Scale every track in the section proportionally from its press height.
         int pressContentH = 0;
         for (int h : m_vPressHeights) {
@@ -947,9 +1498,16 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event)
         return;
     }
 
-    if (m_selected != hit.clip) {
-        m_selected = hit.clip;
-        emit selectionChanged(m_selected);
+    // Right-clicking a clip that isn't part of a multi-selection selects just it; a
+    // right-click within a rubber-band selection keeps the whole set (for Link).
+    const bool inMulti = m_selection.size() >= 2
+                         && std::find(m_selection.begin(), m_selection.end(), hit.clip) != m_selection.end();
+    if (!inMulti) {
+        if (m_selected != hit.clip) {
+            m_selected = hit.clip;
+            emit selectionChanged(m_selected);
+        }
+        m_selection = { hit.clip };
         update();
     }
 
@@ -957,6 +1515,29 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event)
     QMenu menu(this);
     QAction* unlink = menu.addAction("Unlink");
     unlink->setEnabled(clip && clip->linked());
+
+    // Link: shown for a 2+ selection; enabled only when all are unlinked and their
+    // ranges share a common overlap (a link at completely different times is nonsense).
+    QAction* link = nullptr;
+    if (m_selection.size() >= 2) {
+        bool canLink = true;
+        Tick maxStart = std::numeric_limits<Tick>::min();
+        Tick minEnd = std::numeric_limits<Tick>::max();
+        for (ClipId id : m_selection) {
+            const Clip* c = m_project->sequence().findClip(id);
+            if (!c || c->linked()) {
+                canLink = false;
+                break;
+            }
+            maxStart = std::max(maxStart, c->timelineStart);
+            minEnd = std::min(minEnd, c->range().end());
+        }
+        if (canLink && maxStart >= minEnd) {
+            canLink = false;  // no instant common to all selected clips
+        }
+        link = menu.addAction("Link");
+        link->setEnabled(canLink);
+    }
 
     QMenu* labelMenu = menu.addMenu("Label");
     QList<QAction*> labelActions;
@@ -978,13 +1559,20 @@ void TimelineWidget::contextMenuEvent(QContextMenuEvent* event)
     }
 
     menu.addSeparator();
-    QAction* remove = menu.addAction("Delete Clip");
+    const bool multi = m_selection.size() >= 2;
+    QAction* remove = menu.addAction(multi ? "Delete Clips" : "Delete Clip");
 
     QAction* chosen = menu.exec(event->globalPos());
     if (chosen == unlink) {
         emit unlinkRequested(hit.clip);
+    } else if (link && chosen == link) {
+        emit linkRequested(m_selection);
     } else if (chosen == remove) {
-        emit deleteRequested(hit.trackIndex, hit.clip);
+        if (multi) {
+            emit deleteSelectionRequested();
+        } else {
+            emit deleteRequested(hit.trackIndex, hit.clip);
+        }
     } else if (labelActions.contains(chosen)) {
         emit clipLabelRequested(hit.trackIndex, hit.clip, chosen->data().toInt());
     }
@@ -1007,10 +1595,12 @@ int TimelineWidget::firstTrackOfKind(bool video) const
 void TimelineWidget::updateDropGhost(const QPoint& pos, const QMimeData* mime)
 {
     m_dropActive = false;
+    m_snapActive = false;
     if (m_project && mime->hasFormat(kMediaMimeType)) {
         const MediaId id = mime->data(kMediaMimeType).toULongLong();
         if (const MediaSource* media = m_project->media(id)) {
-            m_dropStart = std::max<Tick>(0, m_project->sequence().snapToFrame(tickForX(pos.x())));
+            const Tick framed = std::max<Tick>(0, m_project->sequence().snapToFrame(tickForX(pos.x())));
+            m_dropStart = std::max<Tick>(0, snapDrop(framed, media->duration));  // snap to clip ends
             m_dropDuration = media->duration;
             m_dropVideo = media->hasVideo;
             m_dropAudio = media->hasAudio;
@@ -1041,12 +1631,14 @@ void TimelineWidget::dragMoveEvent(QDragMoveEvent* event)
 void TimelineWidget::dragLeaveEvent(QDragLeaveEvent*)
 {
     m_dropActive = false;
+    m_snapActive = false;
     update();
 }
 
 void TimelineWidget::dropEvent(QDropEvent* event)
 {
     m_dropActive = false;
+    m_snapActive = false;
 
     const QPoint pos = event->position().toPoint();
     Tick start = tickForX(pos.x());
@@ -1054,6 +1646,17 @@ void TimelineWidget::dropEvent(QDropEvent* event)
         start = m_project->sequence().snapToFrame(start);
     }
     start = std::max<Tick>(0, start);
+    // Snap to nearby clip ends, matching the ghost (media has a known duration; a raw
+    // file drop snaps only its start since its length isn't known until imported).
+    Tick dropDuration = 0;
+    if (m_project && event->mimeData()->hasFormat(kMediaMimeType)) {
+        const MediaId id = event->mimeData()->data(kMediaMimeType).toULongLong();
+        if (const MediaSource* media = m_project->media(id)) {
+            dropDuration = media->duration;
+        }
+    }
+    start = std::max<Tick>(0, snapDrop(start, dropDuration));
+    m_snapActive = false;
     const bool videoRegion = m_project && pos.y() < trackLayout().dividerY;
     const int level = levelForY(pos.y(), videoRegion);
 
@@ -1147,6 +1750,12 @@ void TimelineWidget::drawRuler(QPainter& painter)
 
     painter.setPen(kGridLine);
     painter.drawLine(0, kRulerHeight - 1, width(), kRulerHeight - 1);
+
+    // Mouse-position dash (where a ruler click would land the playhead).
+    if (m_hoverX >= kHeaderWidth && m_hoverX < contentRight()) {
+        painter.setPen(QColor(245, 245, 245));
+        painter.drawLine(m_hoverX, kRulerHeight - 7, m_hoverX, kRulerHeight - 1);
+    }
 }
 
 void TimelineWidget::drawTracks(QPainter& painter)
@@ -1167,14 +1776,16 @@ void TimelineWidget::drawTracks(QPainter& painter)
         return std::find(affected.begin(), affected.end(), id) != affected.end();
     };
     auto isHighlighted = [&](const Clip& clip) {
-        if (m_selected == kInvalidClip) {
-            return false;
+        for (ClipId id : m_selection) {
+            if (clip.id == id) {
+                return true;
+            }
+            const Clip* sel = sequence.findClip(id);
+            if (sel && sel->linked() && sel->linkGroup == clip.linkGroup) {
+                return true;
+            }
         }
-        if (clip.id == m_selected) {
-            return true;
-        }
-        const Clip* sel = sequence.findClip(m_selected);
-        return sel && sel->linked() && sel->linkGroup == clip.linkGroup;
+        return false;
     };
 
     for (std::size_t i = 0; i < sequence.trackCount(); ++i) {
@@ -1212,6 +1823,16 @@ void TimelineWidget::drawTracks(QPainter& painter)
                     sourceIn += m_previewDelta;  // head trim advances into the source
                 } else if (m_drag == Drag::TrimTail) {
                     duration += m_previewDelta;
+                }
+            } else if (m_drag == Drag::Roll) {  // left tail + right head together, all linked pairs
+                for (const RollHit& p : m_rollPairs) {
+                    if (clip.id == p.left) {
+                        duration += m_previewDelta;
+                    } else if (clip.id == p.right) {
+                        start += m_previewDelta;
+                        sourceIn += m_previewDelta;
+                        duration -= m_previewDelta;
+                    }
                 }
             }
 
@@ -1314,9 +1935,10 @@ void TimelineWidget::drawTracks(QPainter& painter)
                 if (!isAffected(clip.id)) {
                     continue;
                 }
-                const bool dragged = clip.id == m_dragClip;
+                // Move: only the dragged clip changes track. Duplicate: every copy shifts.
+                const bool shiftLevel = m_dragDuplicate || (clip.id == m_dragClip);
                 const Tick destStart = clip.timelineStart + m_previewDelta;
-                const int destLevel = levelOfTrack(i) + (dragged ? m_dragLevelDelta : 0);
+                const int destLevel = levelOfTrack(i) + (shiftLevel ? m_dragLevelDelta : 0);
                 if (destStart == clip.timelineStart && destLevel == levelOfTrack(i)) {
                     continue;  // no change for this member
                 }
@@ -1477,20 +2099,22 @@ QRect TimelineWidget::vbarHandle(bool video) const
 {
     const QRect bar = vbarRect(video);
     const int inset = 2;
+    const int barH = bar.height();
     const double contentH = sectionContentHeight(video);
     const double viewport = sectionViewport(video);
-    if (contentH <= viewport || contentH <= 0.0 || bar.height() <= 0) {
-        return QRect(bar.left() + inset, bar.top() + inset, bar.width() - 2 * inset, bar.height() - 2 * inset);
+    if (contentH <= 0.0 || barH <= 0) {
+        return QRect(bar.left() + inset, bar.top() + inset, bar.width() - 2 * inset, std::max(0, barH - 2 * inset));
     }
+    // Length encodes zoom (full = all tracks at min height), position encodes scroll.
+    const double minCH = std::max(1.0, static_cast<double>(sectionMinContentHeight(video)));
+    const double lenFrac = std::clamp(minCH / contentH, 0.0, 1.0);
+    const int len = std::min(barH, std::max(kVBarMinHandle, static_cast<int>(std::lround(lenFrac * barH))));
+    // When it all fits, rest the thumb against the divider so the free end can grow to full.
     const double windowTop = video ? (contentH - viewport - m_videoScroll) : m_audioScroll;
-    const double f0 = std::clamp(windowTop / contentH, 0.0, 1.0);
-    const double f1 = std::clamp((windowTop + viewport) / contentH, 0.0, 1.0);
-    int hy0 = bar.top() + static_cast<int>(std::lround(f0 * bar.height()));
-    int hy1 = bar.top() + static_cast<int>(std::lround(f1 * bar.height()));
-    if (hy1 - hy0 < kVBarMinHandle) {
-        hy1 = hy0 + kVBarMinHandle;
-    }
-    return QRect(bar.left() + inset, hy0, bar.width() - 2 * inset, hy1 - hy0);
+    const double scrollFrac = (contentH > viewport) ? std::clamp(windowTop / (contentH - viewport), 0.0, 1.0)
+                                                     : (video ? 1.0 : 0.0);
+    const int hy0 = bar.top() + static_cast<int>(std::lround(scrollFrac * (barH - len)));
+    return QRect(bar.left() + inset, hy0, bar.width() - 2 * inset, len);
 }
 
 void TimelineWidget::drawVBars(QPainter& painter)
@@ -1549,6 +2173,9 @@ void TimelineWidget::paintEvent(QPaintEvent*)
     clampScrolls();  // track counts / size may have changed since the last paint
     drawTracks(painter);
     drawDropGhost(painter);
+    drawSnapIndicator(painter);
+    drawBladeHover(painter);
+    drawBand(painter);
     drawRuler(painter);
     drawPlayhead(painter);
     drawVBars(painter);

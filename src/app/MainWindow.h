@@ -65,9 +65,13 @@ private slots:
 
     void onPropertyEdited(FxProp prop, double modelValue, bool committing);
     void onKeyframeToggled(FxProp prop, bool enabled);
-    void onClipMoved(std::size_t fromTrack, ClipId clip, int levelDelta, Tick newStart);
+    void onClipMoved(std::size_t fromTrack, ClipId clip, int levelDelta, Tick newStart, bool duplicate);
+    void onClipsMoved(const std::vector<ClipId>& clips, Tick delta, bool duplicate);
     void onClipTrimmed(std::size_t trackIndex, ClipId clip, bool trimHead, Tick delta);
+    void onClipSplit(std::size_t trackIndex, ClipId clip, Tick at);
+    void onClipRoll(std::size_t trackIndex, ClipId left, ClipId right, Tick delta);
     void onUnlink(ClipId clip);
+    void onLink(const std::vector<ClipId>& clips);
     void onClipLabel(std::size_t trackIndex, ClipId clip, int label);
     void onDeleteClip(std::size_t trackIndex, ClipId clip);
     void undo();
@@ -80,6 +84,7 @@ private:
     void commitEdit();
     void applyDefaultLayout();
     void reopenPlayer();
+    void activateTool(int tool);  // set the toolbox button + timeline tool (shortcuts / clicks)
     MediaId importMedia(const QString& path, FolderId folder);
     void placeMedia(MediaId media, Tick start, int level = 0);
     bool mediaInUse(MediaId id) const;
