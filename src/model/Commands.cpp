@@ -361,6 +361,132 @@ void TrimClipCommand::undo(Project& project)
     project.sequence().track(m_track).insert(m_original);
 }
 
+bool RippleTrimCommand::apply(Project& project)
+{
+    Sequence& sequence = project.sequence();
+    if (m_track >= sequence.trackCount() || m_delta <= 0) {
+        return false;
+    }
+    Track& track = sequence.track(m_track);
+    const Clip* existing = track.find(m_id);
+    if (!existing) {
+        return false;
+    }
+    const Clip original = *existing;
+    const Tick origEnd = original.range().end();
+
+    Clip trimmed = original;
+    if (m_edge == Edge::Head) {
+        trimmed.sourceIn += m_delta;   // drop the head; timelineStart stays (ripple realigns it)
+        trimmed.duration -= m_delta;
+    } else {
+        trimmed.duration -= m_delta;   // drop the tail
+    }
+    if (!isPlaceable(project, trimmed)) {
+        return false;
+    }
+
+    // The trimmed clip plus every later clip on the track (they slide left to close the gap).
+    m_originals.clear();
+    m_originals.push_back(original);
+    for (const Clip& c : track.clips()) {
+        if (c.id != m_id && c.timelineStart >= origEnd) {
+            m_originals.push_back(c);
+        }
+    }
+
+    for (const Clip& c : m_originals) {
+        track.remove(c.id);
+    }
+    std::vector<ClipId> inserted;
+    auto rollback = [&]() {
+        for (ClipId id : inserted) {
+            track.remove(id);
+        }
+        for (const Clip& c : m_originals) {
+            track.insert(c);
+        }
+        m_originals.clear();
+    };
+    for (const Clip& c : m_originals) {  // ascending start order: trimmed clip, then downstream
+        Clip placed = c.id == m_id ? trimmed : c;
+        if (c.id != m_id) {
+            placed.timelineStart -= m_delta;
+        }
+        if (!isPlaceable(project, placed) || !track.insert(placed)) {
+            rollback();
+            return false;
+        }
+        inserted.push_back(placed.id);
+    }
+    return true;
+}
+
+void RippleTrimCommand::undo(Project& project)
+{
+    Track& track = project.sequence().track(m_track);
+    for (const Clip& c : m_originals) {
+        track.remove(c.id);
+    }
+    for (const Clip& c : m_originals) {
+        track.insert(c);
+    }
+}
+
+bool RippleShiftCommand::apply(Project& project)
+{
+    Sequence& sequence = project.sequence();
+    if (m_track >= sequence.trackCount() || m_delta <= 0) {
+        return false;
+    }
+    Track& track = sequence.track(m_track);
+
+    m_shifted.clear();
+    for (const Clip& c : track.clips()) {
+        if (c.timelineStart >= m_from) {
+            m_shifted.push_back(c);
+        }
+    }
+    if (m_shifted.empty()) {
+        return true;  // nothing at/after the ripple point on this track
+    }
+
+    for (const Clip& c : m_shifted) {
+        track.remove(c.id);
+    }
+    std::vector<ClipId> inserted;
+    auto rollback = [&]() {
+        for (ClipId id : inserted) {
+            track.remove(id);
+        }
+        for (const Clip& c : m_shifted) {
+            track.insert(c);
+        }
+        m_shifted.clear();
+    };
+    for (const Clip& c : m_shifted) {  // ascending start order
+        Clip moved = c;
+        moved.timelineStart -= m_delta;
+        if (!isPlaceable(project, moved) || !track.insert(moved)) {  // e.g. a straddling clip in the way
+            rollback();
+            return false;
+        }
+        inserted.push_back(moved.id);
+    }
+    return true;
+}
+
+void RippleShiftCommand::undo(Project& project)
+{
+    Track& track = project.sequence().track(m_track);
+    for (const Clip& c : m_shifted) {
+        track.remove(c.id);
+    }
+    for (const Clip& c : m_shifted) {
+        track.insert(c);
+    }
+}
+
 bool UnlinkGroupCommand::apply(Project& project)
 {
     if (m_members.empty()) {

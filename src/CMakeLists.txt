@@ -12,12 +12,16 @@ qt_add_executable(hopline
     app/IconButton.h
     app/MediaBrowser.cpp
     app/MediaBrowser.h
+    app/PreferencesDialog.cpp
+    app/PreferencesDialog.h
     app/PreviewCache.cpp
     app/PreviewCache.h
     app/PreviewWidget.cpp
     app/PreviewWidget.h
     app/SequenceDialog.cpp
     app/SequenceDialog.h
+    app/ShortcutManager.cpp
+    app/ShortcutManager.h
     app/TimelineScrollBar.cpp
     app/TimelineScrollBar.h
     app/TimelineWidget.cpp

@@ -35,9 +35,11 @@
 #include "app/AudioMeter.h"
 #include "app/IconButton.h"
 #include "app/MediaBrowser.h"
+#include "app/PreferencesDialog.h"
 #include "app/PreviewCache.h"
 #include "app/PreviewWidget.h"
 #include "app/SequenceDialog.h"
+#include "app/ShortcutManager.h"
 #include "app/EffectControls.h"
 #include "app/TimelineScrollBar.h"
 #include "app/TimelineWidget.h"
@@ -347,14 +349,19 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(m_toolbox, &ToolboxWidget::toolSelected, this,
             [this](int tool) { m_timeline->setTool(static_cast<TimelineWidget::Tool>(tool)); });
-    // Tool shortcuts (V/C/T). WindowShortcut context, so a focused text field's
-    // ShortcutOverride keeps them from firing mid-typing.
-    for (auto [key, tool] : { std::pair{ Qt::Key_V, int(ToolboxWidget::Select) },
-                              { Qt::Key_C, int(ToolboxWidget::Blade) },
-                              { Qt::Key_T, int(ToolboxWidget::Text) } }) {
-        auto* sc = new QShortcut(QKeySequence(key), this);
-        connect(sc, &QShortcut::activated, this, [this, tool] { activateTool(tool); });
-    }
+    // Customizable shortcuts run through the ShortcutManager (rebindable via Edit ▸ Preferences).
+    // WindowShortcut context, so a focused text field's ShortcutOverride blocks them mid-typing.
+    m_shortcuts = std::make_unique<ShortcutManager>(this);
+    m_shortcuts->add("tool.select", "Tools", "Select Tool", QKeySequence(Qt::Key_V),
+                     [this] { activateTool(int(ToolboxWidget::Select)); }, false);
+    m_shortcuts->add("tool.blade", "Tools", "Blade Tool", QKeySequence(Qt::Key_C),
+                     [this] { activateTool(int(ToolboxWidget::Blade)); }, false);
+    m_shortcuts->add("tool.text", "Tools", "Text Tool", QKeySequence(Qt::Key_T),
+                     [this] { activateTool(int(ToolboxWidget::Text)); }, false);
+    m_shortcuts->add("edit.rippleStart", "Editing", "Ripple Trim Start", QKeySequence(Qt::Key_Q),
+                     [this] { rippleTrim(true); }, false);
+    m_shortcuts->add("edit.rippleEnd", "Editing", "Ripple Trim End", QKeySequence(Qt::Key_E),
+                     [this] { rippleTrim(false); }, false);
 
     applyDefaultLayout();
 
@@ -368,22 +375,32 @@ MainWindow::MainWindow(QWidget* parent)
     fileMenu->addSeparator();
     fileMenu->addAction("&Import Media…", this, [this] { importMediaDialog(m_browser->currentFolder()); });
     fileMenu->addSeparator();
-    fileMenu->addAction("&Export Media…", QKeySequence("Ctrl+E"), this, &MainWindow::exportMedia);
+    fileMenu->addAction(m_shortcuts->add("file.export", "File", "&Export Media…",
+                                         QKeySequence("Ctrl+E"), [this] { exportMedia(); }, true));
     fileMenu->addSeparator();
     fileMenu->addAction("E&xit", QKeySequence::Quit, this, &QWidget::close);
 
     auto* editMenu = menuBar()->addMenu("&Edit");
-    editMenu->addAction("&Undo", QKeySequence::Undo, this, &MainWindow::undo);
-    editMenu->addAction("&Redo", QKeySequence::Redo, this, &MainWindow::redo);
+    editMenu->addAction(m_shortcuts->add("edit.undo", "Editing", "&Undo",
+                                         QKeySequence(QKeySequence::Undo), [this] { undo(); }, true));
+    editMenu->addAction(m_shortcuts->add("edit.redo", "Editing", "&Redo",
+                                         QKeySequence(QKeySequence::Redo), [this] { redo(); }, true));
     editMenu->addSeparator();
-    editMenu->addAction("&Delete Clip", QKeySequence::Delete, this, &MainWindow::deleteSelection);
+    editMenu->addAction(m_shortcuts->add("edit.delete", "Editing", "&Delete Clip",
+                                         QKeySequence(QKeySequence::Delete), [this] { deleteSelection(); }, true));
+    editMenu->addSeparator();
+    editMenu->addAction("&Preferences…", this, &MainWindow::showPreferences);
 
     auto* playbackMenu = menuBar()->addMenu("&Playback");
-    playbackMenu->addAction("&Play/Pause", Qt::Key_Space, this, &MainWindow::togglePlay);
+    playbackMenu->addAction(m_shortcuts->add("playback.playPause", "Playback", "&Play/Pause",
+                                             QKeySequence(Qt::Key_Space), [this] { togglePlay(); }, true));
     playbackMenu->addSeparator();
-    playbackMenu->addAction("Back &5s", Qt::Key_Left, this, [this] { seekRelative(-5.0); });
-    playbackMenu->addAction("Forward &5s", Qt::Key_Right, this, [this] { seekRelative(5.0); });
-    playbackMenu->addAction("&Restart", Qt::Key_Home, this, [this] { seekRelative(-1e9); });
+    playbackMenu->addAction(m_shortcuts->add("playback.back5", "Playback", "Back &5s",
+                                             QKeySequence(Qt::Key_Left), [this] { seekRelative(-5.0); }, true));
+    playbackMenu->addAction(m_shortcuts->add("playback.forward5", "Playback", "Forward &5s",
+                                             QKeySequence(Qt::Key_Right), [this] { seekRelative(5.0); }, true));
+    playbackMenu->addAction(m_shortcuts->add("playback.restart", "Playback", "&Restart",
+                                             QKeySequence(Qt::Key_Home), [this] { seekRelative(-1e9); }, true));
 
     auto* windowMenu = menuBar()->addMenu("&Window");
     windowMenu->addAction("&Reset Layout", this, &MainWindow::resetLayout);
@@ -1613,6 +1630,69 @@ void MainWindow::activateTool(int tool)
 {
     m_toolbox->setCurrentTool(tool);  // no-op re-check is fine; doesn't re-emit
     m_timeline->setTool(static_cast<TimelineWidget::Tool>(tool));
+}
+
+void MainWindow::showPreferences()
+{
+    PreferencesDialog dlg(m_shortcuts.get(), this);
+    dlg.exec();  // applies + persists on OK, live on the QActions
+}
+
+void MainWindow::rippleTrim(bool trimStart)
+{
+    if (!m_project.hasActiveSequence()) {
+        return;
+    }
+    const ClipId id = m_timeline->selected();
+    if (id == kInvalidClip) {
+        statusBar()->showMessage("Select a clip first to ripple-trim.");
+        return;
+    }
+    std::size_t track = 0;
+    const Clip* clip = m_project.sequence().findClip(id, &track);
+    if (!clip) {
+        return;
+    }
+    const Tick playhead = m_timeline->playhead();
+    if (playhead <= clip->timelineStart || playhead >= clip->range().end()) {
+        statusBar()->showMessage("Move the playhead inside the clip to ripple-trim.");
+        return;
+    }
+    const Tick clipStart = clip->timelineStart;  // a head trim keeps this — the clip's new start
+    const Tick ripplePoint = clip->range().end();  // original end: everything at/after here slides left
+    const Tick delta = trimStart ? (playhead - clip->timelineStart) : (clip->range().end() - playhead);
+    const auto edge = trimStart ? RippleTrimCommand::Edge::Head : RippleTrimCommand::Edge::Tail;
+
+    // Global ripple: the link group's tracks get the trim (+ their own downstream shift); every
+    // other track slides its clips at/after the ripple point, so all tracks stay in sync.
+    const auto targets = editTargets(m_project, track, id);
+    auto isLinkTrack = [&](std::size_t t) {
+        for (const auto& [lt, lid] : targets) {
+            if (lt == t) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto compound = std::make_unique<CompoundCommand>(trimStart ? "Ripple Trim Start" : "Ripple Trim End");
+    for (const auto& [t, cid] : targets) {
+        compound->add(std::make_unique<RippleTrimCommand>(t, cid, edge, delta));
+    }
+    for (std::size_t t = 0; t < m_project.sequence().trackCount(); ++t) {
+        if (!isLinkTrack(t)) {
+            compound->add(std::make_unique<RippleShiftCommand>(t, ripplePoint, delta));
+        }
+    }
+    if (m_commands.execute(m_project, std::move(compound))) {
+        commitEdit();
+        if (trimStart) {  // front ripple: park the playhead at the trimmed clip's new head
+            m_timeline->setPlayhead(clipStart);
+            timelineScrubbed(clipStart);
+        }
+    } else {
+        statusBar()->showMessage("Ripple trim rejected (would overlap or exceed the source).");
+    }
 }
 
 void MainWindow::onUnlink(ClipId clip)

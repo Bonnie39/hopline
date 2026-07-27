@@ -25,6 +25,7 @@ class IconButton;
 class AudioMeter;
 class ToolboxWidget;
 class EffectControls;
+class ShortcutManager;
 enum class FxProp;  // scoped enum → fixed underlying type, forward-declarable
 
 class MainWindow : public QMainWindow {
@@ -48,6 +49,7 @@ private slots:
     void saveProject();
     void saveProjectAs();
     void exportMedia();
+    void showPreferences();
     void importMediaDialog(FolderId folder);
     void onNewFolder(FolderId parent);
     void onDeleteFolder(FolderId folder);
@@ -89,6 +91,7 @@ private:
     void applyDefaultLayout();
     void reopenPlayer();
     void activateTool(int tool);  // set the toolbox button + timeline tool (shortcuts / clicks)
+    void rippleTrim(bool trimStart);  // Q/E: trim the selected clip to the playhead, ripple the rest
     MediaId importMedia(const QString& path, FolderId folder);
     void placeMedia(MediaId media, Tick start, int level = 0);
     bool mediaInUse(MediaId id) const;
@@ -115,6 +118,7 @@ private:
     AudioMeter* m_meter = nullptr;
     ToolboxWidget* m_toolbox = nullptr;
     EffectControls* m_effects = nullptr;
+    std::unique_ptr<ShortcutManager> m_shortcuts;
     QDockWidget* m_effectsDock = nullptr;
     // The clips the Effect Controls panel currently edits (a linked pair may set both).
     std::size_t m_fxVideoTrack = 0;

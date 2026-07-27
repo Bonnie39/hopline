@@ -191,6 +191,57 @@ private:
     Clip m_original;
 };
 
+// Ripple trim: trims a clip by `delta` (> 0) to the playhead — Head drops the clip's head content
+// (keeping its timeline start), Tail drops its tail — then shifts every later clip on the same
+// track left by delta to close the gap. Compose one per link-group member for a linked V+A edit.
+// Undo restores the clip and every shifted clip.
+class RippleTrimCommand : public Command {
+public:
+    enum class Edge { Head, Tail };
+
+    RippleTrimCommand(size_t trackIndex, ClipId id, Edge edge, Tick delta)
+        : m_track(trackIndex)
+        , m_id(id)
+        , m_edge(edge)
+        , m_delta(delta)
+    {
+    }
+
+    bool apply(Project& project) override;
+    void undo(Project& project) override;
+    std::string name() const override { return "Ripple Trim"; }
+
+private:
+    size_t m_track;
+    ClipId m_id;
+    Edge m_edge;
+    Tick m_delta;
+    std::vector<Clip> m_originals;  // trimmed clip + shifted downstream, captured on apply
+};
+
+// Ripple shift: slides every clip on one track whose start is at/after `from` left by `delta`
+// (> 0). Paired with a RippleTrimCommand on the edited track, this keeps the *other* tracks in
+// sync during a ripple so they stay aligned with whatever they sat next to. Undo restores them.
+class RippleShiftCommand : public Command {
+public:
+    RippleShiftCommand(size_t track, Tick from, Tick delta)
+        : m_track(track)
+        , m_from(from)
+        , m_delta(delta)
+    {
+    }
+
+    bool apply(Project& project) override;
+    void undo(Project& project) override;
+    std::string name() const override { return "Ripple Shift"; }
+
+private:
+    size_t m_track;
+    Tick m_from;
+    Tick m_delta;
+    std::vector<Clip> m_shifted;  // originals of the moved clips, captured on apply
+};
+
 // Clears the link group on every clip that shares it, so they can be moved
 // independently. Undo restores the group on exactly those clips.
 class UnlinkGroupCommand : public Command {

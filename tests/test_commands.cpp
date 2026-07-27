@@ -202,6 +202,89 @@ TEST_CASE("every command round-trips through undo", "[commands]")
     }
 }
 
+TEST_CASE("ripple trim closes the gap by sliding later clips left", "[commands]")
+{
+    Project project = seqProject();
+    CommandStack stack;
+    const MediaId source = addSource(project);  // 100000 long, plenty of source room
+
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 0, 1000, 500))));
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 1000, 1000))));
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 2000, 1000))));
+    const ClipId a = project.sequence().track(0).clips()[0].id;
+    const Snapshot before = snapshot(project);
+
+    SECTION("head trim drops the head content, keeps the start, ripples the rest")
+    {
+        REQUIRE(stack.execute(project,
+                              std::make_unique<RippleTrimCommand>(0, a, RippleTrimCommand::Edge::Head, 300)));
+        const auto& t = project.sequence().track(0).clips();
+        CHECK(t[0].timelineStart == 0);
+        CHECK(t[0].duration == 700);
+        CHECK(t[0].sourceIn == 800);       // 500 + 300, so the picture after the cut is unchanged
+        CHECK(t[1].timelineStart == 700);  // butt-joins the trimmed clip's new end
+        CHECK(t[2].timelineStart == 1700);
+        stack.undo(project);
+        CHECK(snapshot(project) == before);
+    }
+
+    SECTION("tail trim drops the tail content, ripples the rest")
+    {
+        REQUIRE(stack.execute(project,
+                              std::make_unique<RippleTrimCommand>(0, a, RippleTrimCommand::Edge::Tail, 300)));
+        const auto& t = project.sequence().track(0).clips();
+        CHECK(t[0].timelineStart == 0);
+        CHECK(t[0].duration == 700);
+        CHECK(t[0].sourceIn == 500);       // unchanged — the head content is kept
+        CHECK(t[1].timelineStart == 700);
+        CHECK(t[2].timelineStart == 1700);
+        stack.undo(project);
+        CHECK(snapshot(project) == before);
+    }
+
+    SECTION("redo reproduces the ripple exactly")
+    {
+        REQUIRE(stack.execute(project,
+                              std::make_unique<RippleTrimCommand>(0, a, RippleTrimCommand::Edge::Head, 300)));
+        const Snapshot after = snapshot(project);
+        stack.undo(project);
+        CHECK(snapshot(project) == before);
+        stack.redo(project);
+        CHECK(snapshot(project) == after);
+    }
+}
+
+TEST_CASE("ripple shift slides another track's clips, keeping timing relative to its neighbour",
+          "[commands]")
+{
+    Project project = seqProject();
+    CommandStack stack;
+    const MediaId source = addSource(project);
+    const size_t v2 = project.sequence().addTrack(Track::Kind::Video, "V2");
+
+    // V1: A [0,1000], B [1000,1000].  V2: C [1500,1000] — starts halfway through B.
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 0, 1000, 500))));
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(0, makeClip(source, 1000, 1000))));
+    REQUIRE(stack.execute(project, std::make_unique<AddClipCommand>(v2, makeClip(source, 1500, 1000))));
+    const ClipId a = project.sequence().track(0).clips()[0].id;
+    const Snapshot before = snapshot(project);
+
+    // Global ripple (mirrors MainWindow): trim A's head on V1, shift V2 at/after A's end.
+    auto compound = std::make_unique<CompoundCommand>("Ripple");
+    compound->add(std::make_unique<RippleTrimCommand>(0, a, RippleTrimCommand::Edge::Head, 300));
+    compound->add(std::make_unique<RippleShiftCommand>(v2, 1000, 300));
+    REQUIRE(stack.execute(project, std::move(compound)));
+
+    CHECK(project.sequence().track(0).clips()[1].timelineStart == 700);    // B slid left by 300
+    CHECK(project.sequence().track(v2).clips()[0].timelineStart == 1200);  // C slid left by 300 too...
+    // ...so C still starts 500 ticks after B (1200 - 700), its original offset.
+    CHECK(project.sequence().track(v2).clips()[0].timelineStart
+          - project.sequence().track(0).clips()[1].timelineStart == 500);
+
+    stack.undo(project);
+    CHECK(snapshot(project) == before);
+}
+
 TEST_CASE("trims that would invert or run past the source are rejected", "[commands]")
 {
     Project project = seqProject();
